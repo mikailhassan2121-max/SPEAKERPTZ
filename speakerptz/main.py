@@ -7,13 +7,15 @@ import time
 from .audio.simulator import SimulatedAudioSource
 from .audio.channelmap import normalize_channel_map, required_physical_channels
 from .audio.devices import resolve_input_device
-from .cameras.simulator import SimulatorCamera
+from .cameras.manager import CameraManager
+from .cameras.models import CameraState
+from .cameras.base import CameraConnectionError
 from .core.config import load_config, ConfigError
 from .core.detector import ActiveSpeakerDetector
 from .runtime.logging import setup_logging, event as log_event
 
 
-VERSION = "0.5"
+VERSION = "0.6"
 
 
 class ConsoleControls:
@@ -73,11 +75,94 @@ def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""
         print(f"AUDIO DEVICE: {device_label}")
     if audio_warning:
         print(f"AUDIO FAIL-SAFE: {audio_warning}")
-    print("CAMERA CONTROL: SIMULATION ONLY (SAFE DRY RUN)")
+    print(f"CAMERA CONTROL: {camera.mode_banner}")
+    if camera.emergency_stopped:
+        print("CAMERA SAFETY: EMERGENCY STOP LATCHED — PRESS R TO RESET; AUTO STAYS OFF")
+    for camera_id, health in camera.health_all().items():
+        detail = f" | {health.message}" if health.message else ""
+        print(f"CAM {camera_id}: {health.state.value.upper()}{detail}")
     print(f"LAST CAMERA REQUEST: {camera.last_action}")
     print("LOGGING: ON -> logs\\speakerptz-YYYYMMDD.log")
     print()
-    print("HOTKEYS: A = auto on/off | W = wide | 1-9 = manual seat preset (turns auto off) | Q = quit")
+    print("HOTKEYS: A = auto on/off | X = EMERGENCY STOP | R = reset stop | W = wide | 1-9 = manual | Q = quit")
+
+
+def _require_explicit_real_camera_mode(cfg: dict, manager: CameraManager, camera_id: int, operation: str) -> None:
+    if not bool(cfg.get("real_control_enabled", False)):
+        raise SystemExit(
+            f"{operation} BLOCKED: real_control_enabled is false. Configure the exact camera first, "
+            "then deliberately enable real control in config/local.yaml."
+        )
+    camera_cfg = manager.configs.get(int(camera_id))
+    if camera_cfg is None:
+        raise SystemExit(f"{operation} BLOCKED: camera {camera_id} is not configured.")
+    if not camera_cfg.enabled:
+        raise SystemExit(f"{operation} BLOCKED: camera {camera_id} is disabled.")
+    if not camera_cfg.is_real:
+        raise SystemExit(f"{operation} BLOCKED: camera {camera_id} still uses the simulator driver.")
+
+
+def run_camera_probe(cfg: dict, manager: CameraManager, camera_id: int) -> int:
+    _require_explicit_real_camera_mode(cfg, manager, camera_id, "CAMERA PROBE")
+    camera_cfg = manager.configs[int(camera_id)]
+    print("SPEAKERPTZ SINGLE-CAMERA PROBE")
+    print("=" * 72)
+    print(f"Camera {camera_cfg.id}: {camera_cfg.name}")
+    print(f"Protocol: {camera_cfg.driver.upper()} | Endpoint: {camera_cfg.host}:{camera_cfg.port}")
+    print("This is a bounded check of this one configured endpoint; no network scan is performed.")
+    health = manager.connect(int(camera_id))
+    print(f"RESULT: {health.state.value.upper()} — {health.message or health.last_error or ''}")
+    manager.disconnect_all()
+    return 0 if health.ok else 1
+
+
+def run_camera_test(cfg: dict, manager: CameraManager, camera_id: int) -> int:
+    _require_explicit_real_camera_mode(cfg, manager, camera_id, "CAMERA TEST")
+    health = manager.connect(int(camera_id))
+    if not health.ok:
+        print(f"CAMERA TEST FAILED: {health.last_error or health.message}")
+        manager.disconnect_all()
+        return 1
+    phrase = f"MOVE CAMERA {int(camera_id)}"
+    print("REAL PTZ CONTROL TEST")
+    print("=" * 72)
+    print(f"Type exactly {phrase!r} to unlock manual movement. Anything else exits safely.")
+    if input("> ").strip() != phrase:
+        print("Confirmation did not match. No movement command was sent.")
+        manager.disconnect_all()
+        return 1
+
+    wide = cfg["wide_shot"]
+    print("Commands: P <preset> | W (configured wide, if on this camera) | H (home) | S (stop) | Q")
+    try:
+        while True:
+            command = input("camera-test> ").strip().lower()
+            if command in {"q", "quit", "exit"}:
+                break
+            if command in {"s", "stop"}:
+                result = manager.stop(camera_id)
+            elif command in {"h", "home"}:
+                result = manager.home(camera_id)
+            elif command in {"w", "wide"}:
+                if int(wide["camera"]) != int(camera_id):
+                    print("Configured wide shot belongs to a different camera.")
+                    continue
+                result = manager.goto_preset(camera_id, int(wide["preset"]), "Wide test", force=True)
+            elif command.startswith("p "):
+                try:
+                    preset = int(command.split(maxsplit=1)[1])
+                except ValueError:
+                    print("Preset must be an integer.")
+                    continue
+                result = manager.goto_preset(camera_id, preset, "Manual test", force=True)
+            else:
+                print("Unknown command. Use P <preset>, W, H, S, or Q.")
+                continue
+            print("OK" if result.accepted else f"BLOCKED/FAILED: {result.reason}")
+    finally:
+        manager.stop(camera_id)
+        manager.disconnect_all()
+    return 0
 
 
 def build_detector(audio_cfg, now=None):
@@ -106,6 +191,8 @@ def main():
     parser.add_argument("--doctor", action="store_true", help="Run startup self-test and exit")
     parser.add_argument("--identify-channels", action="store_true", help="Meter raw physical inputs to identify DVS/Dante channel numbers")
     parser.add_argument("--identify-count", type=int, help="Physical input count to open in identifier mode")
+    parser.add_argument("--camera-probe", type=int, metavar="ID", help="Safely probe one configured camera endpoint and exit")
+    parser.add_argument("--camera-test", type=int, metavar="ID", help="Explicit interactive manual test for one real camera")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -136,6 +223,17 @@ def main():
     device_name = args.device_name or runtime_cfg.get("device_name")
     hostapi_name = runtime_cfg.get("hostapi_name")
 
+    logger = setup_logging(str(runtime_cfg.get("log_dir", "logs")))
+    try:
+        camera = CameraManager.from_config(cfg, logger=logger)
+    except CameraConnectionError as exc:
+        raise SystemExit(f"CAMERA CONFIGURATION ERROR: {exc}")
+
+    if args.camera_probe is not None:
+        raise SystemExit(run_camera_probe(cfg, camera, args.camera_probe))
+    if args.camera_test is not None:
+        raise SystemExit(run_camera_test(cfg, camera, args.camera_test))
+
     if args.identify_channels:
         if requested_sim:
             raise SystemExit("CHANNEL IDENTIFIER requires a real audio device; set runtime.mode: real.")
@@ -155,12 +253,9 @@ def main():
         run_identifier(match.index, count, sample_rate, f"{match.index} | {match.name}")
         return
 
-    logger = setup_logging(str(runtime_cfg.get("log_dir", "logs")))
-    camera = SimulatorCamera()
     detector = build_detector(audio_cfg)
     wide = cfg["wide_shot"]
     controls = ConsoleControls()
-    auto_enabled = bool(runtime_cfg.get("auto_start", True))
     device_label = ""
     audio_warning = ""
     stale_logged = False
@@ -199,6 +294,23 @@ def main():
             channel_map=channel_map,
         )
 
+    camera_health = camera.connect_all()
+    cameras_ready = all(health.ok or health.state == CameraState.DISABLED for health in camera_health.values())
+    # Real mode is deliberately re-armed by the operator on every launch. A
+    # persistent config file alone can never make AUTO start moving cameras.
+    auto_enabled = (
+        bool(runtime_cfg.get("auto_start", True))
+        and cameras_ready
+        and not camera.real_control_enabled
+    )
+    log_event(
+        logger,
+        "camera_runtime_ready",
+        mode=camera.mode_banner,
+        auto_enabled=auto_enabled,
+        camera_states={camera_id: health.state.value for camera_id, health in camera_health.items()},
+    )
+
     running = True
     try:
         while running:
@@ -207,18 +319,31 @@ def main():
                 running = False
                 continue
             if key == "a":
-                auto_enabled = not auto_enabled
+                if camera.emergency_stopped:
+                    auto_enabled = False
+                elif all(h.ok for h in camera.health_all().values() if h.state != CameraState.DISABLED):
+                    auto_enabled = not auto_enabled
+                else:
+                    auto_enabled = False
                 log_event(logger, "auto_director", enabled=auto_enabled)
+            elif key == "x":
+                auto_enabled = False
+                camera.emergency_stop()
+                log_event(logger, "operator_emergency_stop")
+            elif key == "r":
+                auto_enabled = False
+                camera.clear_emergency_stop()
+                log_event(logger, "operator_emergency_stop_reset")
             elif key == "w":
-                camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot (manual)")
-                log_event(logger, "camera_request", source="manual", camera=int(wide["camera"]), preset=int(wide["preset"]), label="Wide shot")
+                result = camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot (manual)")
+                log_event(logger, "camera_request", source="manual", camera=int(wide["camera"]), preset=int(wide["preset"]), label="Wide shot", accepted=result.accepted, reason=result.reason)
             elif key and key.isdigit() and key != "0":
                 channel = int(key)
                 if channel in routes:
                     auto_enabled = False
                     r = routes[channel]
-                    camera.goto_preset(r.camera, r.preset, f"{r.name} (manual)")
-                    log_event(logger, "camera_request", source="manual", mic_channel=channel, camera=r.camera, preset=r.preset, label=r.name)
+                    result = camera.goto_preset(r.camera, r.preset, f"{r.name} (manual)")
+                    log_event(logger, "camera_request", source="manual", mic_channel=channel, camera=r.camera, preset=r.preset, label=r.name, accepted=result.accepted, reason=result.reason)
 
             levels = source.read_levels()
             audio_ok = True
@@ -231,6 +356,7 @@ def main():
                     if auto_enabled:
                         auto_enabled = False
                     if not stale_logged:
+                        camera.emergency_stop()
                         log_event(logger, "audio_stale", seconds=round(health.stale_seconds, 3), status=health.callback_status)
                         stale_logged = True
                 else:
@@ -245,11 +371,11 @@ def main():
                 kind, channel = event
                 if kind == "speaker" and channel in routes:
                     r = routes[channel]
-                    camera.goto_preset(r.camera, r.preset, r.name)
-                    log_event(logger, "speaker_change", mic_channel=channel, name=r.name, confidence=round(detector.confidence, 4), camera=r.camera, preset=r.preset)
+                    result = camera.goto_preset(r.camera, r.preset, r.name)
+                    log_event(logger, "speaker_change", mic_channel=channel, name=r.name, confidence=round(detector.confidence, 4), camera=r.camera, preset=r.preset, accepted=result.accepted, reason=result.reason)
                 elif kind == "silence":
-                    camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot")
-                    log_event(logger, "silence_wide", camera=int(wide["camera"]), preset=int(wide["preset"]))
+                    result = camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot")
+                    log_event(logger, "silence_wide", camera=int(wide["camera"]), preset=int(wide["preset"]), accepted=result.accepted, reason=result.reason)
 
             render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning)
             time.sleep(0.1)
@@ -258,6 +384,8 @@ def main():
     finally:
         if needs_stop:
             source.stop()
+        camera.emergency_stop()
+        camera.disconnect_all()
         log_event(logger, "shutdown")
         print("\nStopped.")
 

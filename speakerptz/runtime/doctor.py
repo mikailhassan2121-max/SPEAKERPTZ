@@ -7,6 +7,9 @@ from pathlib import Path
 from speakerptz.audio.channelmap import normalize_channel_map, required_physical_channels
 from speakerptz.audio.devices import list_input_devices, resolve_input_device
 from speakerptz.core.config import load_config, ConfigError
+from speakerptz.cameras.base import CameraConnectionError
+from speakerptz.cameras.manager import CameraManager
+from speakerptz.cameras.models import CameraState
 
 
 def run_doctor(config_path: str) -> int:
@@ -36,6 +39,7 @@ def run_doctor(config_path: str) -> int:
 
     print(f"[PASS] Channel map: {logical_channels} logical mic(s) -> physical inputs {channel_map}")
 
+    simulation_mode = runtime.get("mode", "real") == "simulate"
     print("\nWindows audio inputs visible to Python:")
     try:
         devices = list_input_devices()
@@ -46,11 +50,12 @@ def run_doctor(config_path: str) -> int:
             print("  (none)")
             failures += 1
     except Exception as exc:
-        print(f"[FAIL] Could not enumerate audio devices: {exc}")
-        failures += 1
+        level = "WARN" if simulation_mode else "FAIL"
+        print(f"[{level}] Could not enumerate audio devices: {exc}")
+        failures += 0 if simulation_mode else 1
         devices = []
 
-    if runtime.get("mode", "real") == "simulate":
+    if simulation_mode:
         print("\n[PASS] Runtime mode: simulation")
     else:
         try:
@@ -86,7 +91,33 @@ def run_doctor(config_path: str) -> int:
         print(f"[FAIL] Logs directory: {exc}")
         failures += 1
 
-    print("[PASS] Camera driver: simulator (no real PTZ commands can leave this build)")
+    real_control = bool(cfg.get("real_control_enabled", False))
+    if real_control:
+        print("\n[WARN] CAMERA SAFETY: REAL PTZ CONTROL ENABLED")
+    else:
+        print("\n[PASS] Camera safety: SIMULATION / DRY RUN; real PTZ transmission disabled")
+
+    try:
+        cameras = CameraManager.from_config(cfg)
+        camera_health = cameras.connect_all()
+        for camera_id, camera_cfg in cameras.configs.items():
+            health = camera_health[camera_id]
+            configured = camera_cfg.driver.upper()
+            effective = configured if real_control else "SIMULATOR"
+            prefix = "PASS" if health.ok or health.state == CameraState.DISABLED else "FAIL"
+            print(
+                f"[{prefix}] Camera {camera_id}: {camera_cfg.name} | configured={configured} | "
+                f"effective={effective} | {health.state.value.upper()}"
+            )
+            if camera_cfg.enabled and not health.ok:
+                failures += 1
+                if health.last_error:
+                    print(f"       {health.last_error}")
+        cameras.disconnect_all()
+    except CameraConnectionError as exc:
+        print(f"[FAIL] Camera configuration/credentials: {exc}")
+        failures += 1
+
     print("=" * 88)
     print("DOCTOR RESULT:", "PASS" if failures == 0 else f"FAIL ({failures} issue(s))")
     return 0 if failures == 0 else 1
