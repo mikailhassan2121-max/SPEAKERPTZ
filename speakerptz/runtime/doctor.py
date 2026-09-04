@@ -10,6 +10,8 @@ from speakerptz.core.config import load_config, ConfigError
 from speakerptz.cameras.base import CameraConnectionError
 from speakerptz.cameras.manager import CameraManager
 from speakerptz.cameras.models import CameraState
+from speakerptz.core.config import CURRENT_CONFIG_VERSION
+from speakerptz.runtime.state import RuntimeState
 
 
 def run_doctor(config_path: str) -> int:
@@ -36,6 +38,7 @@ def run_doctor(config_path: str) -> int:
     device_index = runtime.get("device_index")
     device_name = runtime.get("device_name")
     hostapi_name = runtime.get("hostapi_name")
+    print(f"[PASS] Config schema: {cfg.get('config_version', CURRENT_CONFIG_VERSION)}")
 
     print(f"[PASS] Channel map: {logical_channels} logical mic(s) -> physical inputs {channel_map}")
     vad_state = "enabled" if audio.get("vad_enabled", True) else "disabled (level-only compatibility mode)"
@@ -108,6 +111,16 @@ def run_doctor(config_path: str) -> int:
     except Exception as exc:
         print(f"[FAIL] Logs directory: {exc}")
         failures += 1
+
+    state_path = str(runtime.get("state_file", "logs/runtime-state.json"))
+    lock_path = str(runtime.get("instance_lock_file", "logs/speakerptz.lock"))
+    prior_state = RuntimeState(state_path)
+    print(
+        f"[PASS] Runtime resilience: heartbeat={float(runtime.get('heartbeat_seconds', 5.0)):.1f}s | "
+        f"state={state_path} | lock={lock_path}"
+    )
+    if prior_state.previous_unclean_shutdown:
+        print("[WARN] Previous runtime state indicates an unclean shutdown; AUTO will still start safely.")
 
     real_control = bool(cfg.get("real_control_enabled", False))
     if real_control:

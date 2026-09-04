@@ -37,8 +37,12 @@ class RealAudioSource:
         self._last = AudioObservation([-100.0] * self.channels, [0.0] * self.channels)
         self._vad = VoiceActivityAnalyzer(self.sample_rate, self.channels)
         self._last_callback = 0.0
+        self._callback_count = 0
         self._last_status = ""
-        self._stream = sd.InputStream(
+        self._stream = self._create_stream()
+
+    def _create_stream(self):
+        return sd.InputStream(
             device=self.device,
             channels=self.physical_channels,
             samplerate=self.sample_rate,
@@ -56,6 +60,7 @@ class RealAudioSource:
 
     def _callback(self, indata, frames, time_info, status):
         self._last_callback = time.monotonic()
+        self._callback_count += 1
         self._last_status = str(status) if status else ""
         logical_samples = np.asarray(indata[:, self._indices], dtype=np.float64)
         observation = self._vad.analyze(logical_samples)
@@ -79,6 +84,22 @@ class RealAudioSource:
         self._stream.stop()
         self._stream.close()
 
+    def restart(self):
+        """Reopen the same configured device; callers provide attempt bounds."""
+        try:
+            self._stream.stop()
+        except Exception:
+            pass
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+        self._stream = self._create_stream()
+        self._q = queue.Queue(maxsize=8)
+        self._last = AudioObservation([-100.0] * self.channels, [0.0] * self.channels)
+        self._last_status = ""
+        self.start()
+
     def read_observation(self) -> AudioObservation:
         try:
             while True:
@@ -93,3 +114,7 @@ class RealAudioSource:
     def health(self, stale_after: float = 1.5) -> AudioHealth:
         age = max(0.0, time.monotonic() - self._last_callback)
         return AudioHealth(ok=age <= float(stale_after), stale_seconds=age, callback_status=self._last_status)
+
+    @property
+    def callback_count(self) -> int:
+        return self._callback_count

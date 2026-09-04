@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 import ipaddress
 import re
 import yaml
@@ -13,6 +14,7 @@ class ConfigError(ValueError):
 
 
 SUPPORTED_CAMERA_DRIVERS = {"simulator", "visca", "onvif"}
+CURRENT_CONFIG_VERSION = 1
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -148,9 +150,13 @@ def _validate_cameras(data: dict) -> dict[int, dict]:
     _require_number(control, "command_interval_seconds", 0.10)
     _require_number(control, "movement_cooldown_seconds", 0.75)
     _require_number(control, "retry_backoff_seconds", 0.10)
+    _require_number(control, "reconnect_interval_seconds", 2.0, 0.1)
     retries = _require_int(control, "retry_count", 0) if "retry_count" in control else 1
     if retries > 3:
         raise ConfigError("camera_control.retry_count must be between 0 and 3.")
+    reconnects = _require_int(control, "reconnect_attempt_limit", 0) if "reconnect_attempt_limit" in control else 3
+    if reconnects > 10:
+        raise ConfigError("camera_control.reconnect_attempt_limit must be between 0 and 10.")
 
     cameras = data.get("cameras")
     if cameras is None:
@@ -211,6 +217,22 @@ def validate_config(data: dict) -> None:
     if "wide_shot" not in data or not isinstance(data["wide_shot"], dict):
         raise ConfigError("Missing wide_shot section.")
 
+    version = data.get("config_version", CURRENT_CONFIG_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool) or version != CURRENT_CONFIG_VERSION:
+        raise ConfigError(f"config_version must be {CURRENT_CONFIG_VERSION}.")
+    runtime = data.get("runtime", {})
+    if not isinstance(runtime, dict):
+        raise ConfigError("runtime must be a mapping.")
+    _require_number(runtime, "heartbeat_seconds", 5.0, 0.5)
+    _require_number(runtime, "health_check_seconds", 1.0, 0.1)
+    _require_number(runtime, "audio_reconnect_interval_seconds", 2.0, 0.1)
+    audio_attempts = _require_int(runtime, "audio_reconnect_attempts", 0) if "audio_reconnect_attempts" in runtime else 3
+    if audio_attempts > 10:
+        raise ConfigError("runtime.audio_reconnect_attempts must be between 0 and 10.")
+    for key in ("instance_lock_file", "state_file"):
+        if key in runtime and (not isinstance(runtime[key], str) or not runtime[key].strip()):
+            raise ConfigError(f"runtime.{key} must be a non-empty path string.")
+
     _validate_dashboard(data)
     cameras = _validate_cameras(data)
 
@@ -254,6 +276,18 @@ def validate_config(data: dict) -> None:
             raise ConfigError("wide_shot VISCA preset must be between 1 and 64.")
 
 
+def migrate_config(data: dict) -> tuple[dict, list[str]]:
+    """Normalize legacy pre-schema configs without mutating caller data."""
+    if not isinstance(data, dict):
+        return data, []
+    migrated = copy.deepcopy(data)
+    notes = []
+    if "config_version" not in migrated:
+        migrated["config_version"] = CURRENT_CONFIG_VERSION
+        notes.append("Legacy config without config_version interpreted as schema 1.")
+    return migrated, notes
+
+
 def load_config(path: str):
     config_path = Path(path)
     if not config_path.exists():
@@ -261,7 +295,7 @@ def load_config(path: str):
             f"Config file not found: {config_path}. Copy config/local.example.yaml to config/local.yaml "
             "for the school computer, or pass --config config/room.yaml for development."
         )
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data, _ = migrate_config(yaml.safe_load(config_path.read_text(encoding="utf-8")))
     validate_config(data)
     routes = {
         int(p["mic_channel"]): PersonRoute(

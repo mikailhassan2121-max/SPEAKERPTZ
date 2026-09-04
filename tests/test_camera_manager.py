@@ -143,3 +143,54 @@ def test_legacy_config_without_cameras_gets_safe_simulators():
     )
     assert [cfg.id for cfg in configs] == [1, 2]
     assert all(cfg.driver == "simulator" for cfg in configs)
+
+
+def test_camera_health_reconnect_is_paced_and_bounded():
+    now = [0.0]
+    driver = FakeDriver()
+    manager = CameraManager(
+        [CameraConfig(1, "One")],
+        driver_factories={"simulator": lambda cfg: driver},
+        reconnect_interval_seconds=1.0,
+        reconnect_attempt_limit=2,
+        clock=lambda: now[0],
+    )
+    manager.connect_all()
+    driver.connected = False
+    manager.maintain_health()
+    assert driver.connected
+    driver.connected = False
+    now[0] = 0.2
+    manager.maintain_health()
+    assert not driver.connected
+    now[0] = 1.1
+    manager.maintain_health()
+    assert driver.connected
+
+
+def test_camera_health_stops_after_bounded_failed_reconnects():
+    class NeverConnects(FakeDriver):
+        def __init__(self):
+            super().__init__()
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise RuntimeError("offline")
+
+    now = [0.0]
+    driver = NeverConnects()
+    manager = CameraManager(
+        [CameraConfig(1, "One")],
+        driver_factories={"simulator": lambda cfg: driver},
+        reconnect_interval_seconds=1.0,
+        reconnect_attempt_limit=2,
+        clock=lambda: now[0],
+    )
+    manager.connect_all()
+    manager.maintain_health()
+    now[0] = 1.1
+    manager.maintain_health()
+    now[0] = 5.0
+    manager.maintain_health()
+    assert driver.connect_calls == 3  # initial connection plus two reconnect attempts

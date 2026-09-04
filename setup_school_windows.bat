@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 echo ==============================================
-echo SPEAKERPTZ v0.8 - School computer setup
+echo SPEAKERPTZ v0.9 - School computer setup
 echo ==============================================
 py -3.12 --version >nul 2>&1
 if errorlevel 1 (
@@ -29,3 +29,4 @@ echo.
 echo Setup complete.
 echo Next: run doctor_school.bat
 echo After doctor passes: identify_dante_channels.bat
+echo Optional after validation: install_windows_autostart.ps1
