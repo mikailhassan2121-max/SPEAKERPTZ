@@ -90,3 +90,76 @@ def test_local_http_api_is_readable_but_commands_require_token():
         assert state.drain_commands()[0].action == "wide"
     finally:
         server.stop()
+
+
+def test_rejected_command_bodies_never_abort_the_connection():
+    # Regression test for a Windows-only flaky failure: an early rejection
+    # (bad token here) must still fully read the request body before
+    # responding. Otherwise unread bytes left in the socket receive buffer
+    # cause the OS to send a hard RST on close instead of a graceful
+    # shutdown, which surfaces to the client as ConnectionAbortedError /
+    # WinError 10053 instead of the intended HTTP error response. Repeated
+    # here (fresh connection each time) because the original bug depended on
+    # TCP buffering/timing and did not reproduce on every single request.
+    state = DashboardState()
+    state.update(version="0.10", mode_banner="SIMULATION / DRY RUN")
+    server = DashboardServer(state, "127.0.0.1", 0)
+    url = server.start()
+    try:
+        body = json.dumps({"action": "wide"}).encode()
+        for _ in range(50):
+            request = Request(
+                f"{url}/api/command",
+                data=body,
+                headers={"Content-Type": "application/json", "X-SpeakerPTZ-Token": "wrong-token"},
+                method="POST",
+            )
+            try:
+                urlopen(request, timeout=2)
+            except HTTPError as exc:
+                assert exc.code == 403
+            else:
+                raise AssertionError("command with an invalid token should be rejected")
+    finally:
+        server.stop()
+
+
+def test_oversized_command_body_is_rejected_without_aborting_connection():
+    # A body larger than the accepted MAX_COMMAND_BODY_BYTES (4096) must
+    # still be fully drained off the socket before the rejection response is
+    # sent, or the same Windows RST-on-close failure as above reproduces for
+    # any client that happens to send a too-large body.
+    state = DashboardState()
+    state.update(version="1.0-rc1", mode_banner="SIMULATION / DRY RUN")
+    server = DashboardServer(state, "127.0.0.1", 0)
+    url = server.start()
+    try:
+        oversized = json.dumps({"action": "wide", "padding": "x" * 5000}).encode()
+        for _ in range(10):
+            request = Request(
+                f"{url}/api/command",
+                data=oversized,
+                headers={"Content-Type": "application/json", "X-SpeakerPTZ-Token": state.control_token},
+                method="POST",
+            )
+            try:
+                urlopen(request, timeout=2)
+            except HTTPError as exc:
+                assert exc.code == 400
+            else:
+                raise AssertionError("an oversized command body should be rejected")
+    finally:
+        server.stop()
+
+
+def test_post_handler_bounds_blocking_reads_with_a_timeout():
+    # Regression guard: do_POST reads the request body before checking the
+    # control token, so an unauthenticated peer that drip-feeds a body could
+    # pin a handler thread open forever unless the socket read is bounded.
+    # BaseHTTPRequestHandler.timeout defaults to None (unbounded), so this
+    # must be set explicitly.
+    state = DashboardState()
+    server = DashboardServer(state, "127.0.0.1", 0)
+    handler_cls = server._handler()
+    assert handler_cls.timeout is not None
+    assert handler_cls.timeout > 0

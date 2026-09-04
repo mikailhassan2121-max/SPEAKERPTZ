@@ -24,6 +24,16 @@ ALLOWED_ACTIONS = {
     "manual_preset",
 }
 
+# Largest command payload the API will ever accept as valid.
+MAX_COMMAND_BODY_BYTES = 4096
+# Largest body the handler will actually read off the socket before giving
+# up on draining it, even for a request it is about to reject. Bounded well
+# above MAX_COMMAND_BODY_BYTES so a slightly-too-large body still gets fully
+# drained (avoiding the Windows RST-on-close described below), while staying
+# far short of a size an adversarial Content-Length could use to force large
+# reads.
+_BODY_DRAIN_CEILING_BYTES = 65536
+
 
 @dataclass(frozen=True)
 class DashboardCommand:
@@ -202,7 +212,13 @@ class DashboardServer:
         state = self.state
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "SPEAKERPTZ/0.8"
+            server_version = "SPEAKERPTZ/1.0-rc1"
+            # Bounds every blocking socket read (request line and body) so a
+            # slow-drip or unauthenticated peer can never pin a handler
+            # thread open indefinitely -- do_POST reads the request body
+            # before checking the control token (see below), so this timeout
+            # is what keeps that read from becoming a slowloris vector.
+            timeout = 10.0
 
             def log_message(self, format, *args):
                 return
@@ -241,21 +257,33 @@ class DashboardServer:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
             def do_POST(self):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                # Always drain the request body up front, before any early
+                # rejection. If a response is sent and the connection closed
+                # while the client's body is still unread in the socket
+                # buffer, Windows sends a hard RST instead of a graceful
+                # close, which surfaces to the client as a flaky
+                # ConnectionAbortedError (WinError 10053) unrelated to the
+                # actual request outcome. Draining up to _BODY_DRAIN_CEILING
+                # (well above MAX_COMMAND_BODY_BYTES) means a too-large-but-
+                # not-absurd body is still fully consumed before the 400
+                # below; the handler's `timeout` bounds this read so a
+                # slow-drip peer cannot hold the thread open indefinitely.
+                body = self.rfile.read(min(length, _BODY_DRAIN_CEILING_BYTES)) if length > 0 else b""
                 if urlparse(self.path).path != "/api/command":
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
                     return
                 if not secrets.compare_digest(self.headers.get("X-SpeakerPTZ-Token", ""), state.control_token):
                     self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid dashboard control token"})
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    length = 0
-                if length <= 0 or length > 4096:
+                if length <= 0 or length > MAX_COMMAND_BODY_BYTES:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid request size"})
                     return
                 try:
-                    payload = json.loads(self.rfile.read(length))
+                    payload = json.loads(body)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON"})
                     return
