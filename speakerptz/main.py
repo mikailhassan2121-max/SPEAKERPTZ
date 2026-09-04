@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import signal
+import sys
 import time
 
 from .audio.simulator import SimulatedAudioSource
@@ -13,10 +16,12 @@ from .cameras.base import CameraConnectionError
 from .core.config import load_config, ConfigError
 from .core.detector import ActiveSpeakerDetector
 from .runtime.logging import setup_logging, event as log_event
+from .runtime.instance import InstanceLock, InstanceLockError
+from .runtime.state import RuntimeState
 from .ui.dashboard import DashboardCommand, DashboardServer, DashboardState
 
 
-VERSION = "0.8"
+VERSION = "0.9"
 
 
 class ConsoleControls:
@@ -52,7 +57,7 @@ def render(
     print("=" * 104)
 
     if snap.calibrating:
-        print(f"CALIBRATING ROOM NOISE: {snap.calibration_remaining:0.1f}s remaining — stay quiet")
+        print(f"CALIBRATING ROOM NOISE: {snap.calibration_remaining:0.1f}s remaining - stay quiet")
         print("-" * 104)
 
     channel_map = channel_map or list(range(1, len(levels) + 1))
@@ -69,10 +74,10 @@ def render(
         snr_text = f"+{snr:4.1f}" if snr is not None and snr >= 0 else (f"{snr:5.1f}" if snr is not None else "  --.-")
         print(
             f"MIC {idx:02d} <- IN {physical:02d} | {name[:18]:18} {db:6.1f} dB | "
-            f"{floor_text} | SNR {snr_text} | VAD {speech * 100:5.1f}% | {'█' * bars}{marker}"
+            f"{floor_text} | SNR {snr_text} | VAD {speech * 100:5.1f}% | {'#' * bars}{marker}"
             if speech is not None
             else f"MIC {idx:02d} <- IN {physical:02d} | {name[:18]:18} {db:6.1f} dB | "
-            f"{floor_text} | SNR {snr_text} | VAD   --.-% | {'█' * bars}{marker}"
+            f"{floor_text} | SNR {snr_text} | VAD   --.-% | {'#' * bars}{marker}"
         )
 
     print()
@@ -94,7 +99,7 @@ def render(
         print(f"AUDIO FAIL-SAFE: {audio_warning}")
     print(f"CAMERA CONTROL: {camera.mode_banner}")
     if camera.emergency_stopped:
-        print("CAMERA SAFETY: EMERGENCY STOP LATCHED — PRESS R TO RESET; AUTO STAYS OFF")
+        print("CAMERA SAFETY: EMERGENCY STOP LATCHED - PRESS R TO RESET; AUTO STAYS OFF")
     for camera_id, health in camera.health_all().items():
         detail = f" | {health.message}" if health.message else ""
         print(f"CAM {camera_id}: {health.state.value.upper()}{detail}")
@@ -130,7 +135,7 @@ def run_camera_probe(cfg: dict, manager: CameraManager, camera_id: int) -> int:
     print(f"Protocol: {camera_cfg.driver.upper()} | Endpoint: {camera_cfg.host}:{camera_cfg.port}")
     print("This is a bounded check of this one configured endpoint; no network scan is performed.")
     health = manager.connect(int(camera_id))
-    print(f"RESULT: {health.state.value.upper()} — {health.message or health.last_error or ''}")
+    print(f"RESULT: {health.state.value.upper()} - {health.message or health.last_error or ''}")
     manager.disconnect_all()
     return 0 if health.ok else 1
 
@@ -228,7 +233,17 @@ def main():
     parser.add_argument("--camera-test", type=int, metavar="ID", help="Explicit interactive manual test for one real camera")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable the configured localhost dashboard")
     parser.add_argument("--dashboard-port", type=int, help="Override the configured localhost dashboard port")
+    parser.add_argument("--soak-test", action="store_true", help="Run bounded synthetic resilience test and exit")
+    parser.add_argument("--soak-iterations", type=int, default=5000, help="Synthetic frames for --soak-test")
+    parser.add_argument("--soak-seed", type=int, default=17, help="Deterministic seed for --soak-test")
     args = parser.parse_args()
+
+    if args.soak_test:
+        from .runtime.soak import run_soak_test
+
+        summary = run_soak_test(args.soak_iterations, seed=args.soak_seed)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        raise SystemExit(0 if summary["passed"] else 7)
 
     if args.list_devices:
         from .audio.devices import list_input_devices
@@ -258,16 +273,29 @@ def main():
     device_name = args.device_name or runtime_cfg.get("device_name")
     hostapi_name = runtime_cfg.get("hostapi_name")
 
+    instance_lock = InstanceLock(str(runtime_cfg.get("instance_lock_file", "logs/speakerptz.lock")))
+    try:
+        instance_lock.acquire()
+    except InstanceLockError as exc:
+        raise SystemExit(f"INSTANCE ERROR: {exc}")
+
     logger = setup_logging(str(runtime_cfg.get("log_dir", "logs")))
     try:
         camera = CameraManager.from_config(cfg, logger=logger)
     except CameraConnectionError as exc:
+        instance_lock.release()
         raise SystemExit(f"CAMERA CONFIGURATION ERROR: {exc}")
 
     if args.camera_probe is not None:
-        raise SystemExit(run_camera_probe(cfg, camera, args.camera_probe))
+        try:
+            raise SystemExit(run_camera_probe(cfg, camera, args.camera_probe))
+        finally:
+            instance_lock.release()
     if args.camera_test is not None:
-        raise SystemExit(run_camera_test(cfg, camera, args.camera_test))
+        try:
+            raise SystemExit(run_camera_test(cfg, camera, args.camera_test))
+        finally:
+            instance_lock.release()
 
     if args.identify_channels:
         if requested_sim:
@@ -285,8 +313,11 @@ def main():
         except Exception as exc:
             raise SystemExit(f"AUDIO DEVICE ERROR: {exc}")
         from .audio.identifier import run_identifier
-        run_identifier(match.index, count, sample_rate, f"{match.index} | {match.name}")
-        return
+        try:
+            run_identifier(match.index, count, sample_rate, f"{match.index} | {match.name}")
+            return
+        finally:
+            instance_lock.release()
 
     detector = build_detector(audio_cfg)
     wide = cfg["wide_shot"]
@@ -348,6 +379,14 @@ def main():
         auto_enabled=auto_enabled,
         camera_states={camera_id: health.state.value for camera_id, health in camera_health.items()},
     )
+    runtime_state = RuntimeState(str(runtime_cfg.get("state_file", "logs/runtime-state.json")))
+    previous_unclean = runtime_state.previous_unclean_shutdown
+    state_warning = "Previous SPEAKERPTZ run did not record a clean shutdown" if previous_unclean else ""
+    last_heartbeat = 0.0
+    last_health_check = 0.0
+    last_audio_reconnect = 0.0
+    audio_reconnect_attempts = 0
+    observed_callback_count = getattr(source, "callback_count", 0)
 
     def dashboard_command(command: DashboardCommand) -> None:
         nonlocal auto_enabled
@@ -398,7 +437,28 @@ def main():
             )
 
     running = True
+    prior_signal_handlers = {}
+
+    def request_shutdown(signum, _frame):
+        nonlocal running
+        running = False
+        log_event(logger, "shutdown_requested", signal=signum)
+
+    shutdown_signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        shutdown_signals.append(signal.SIGBREAK)
+    for shutdown_signal in shutdown_signals:
+        try:
+            prior_signal_handlers[shutdown_signal] = signal.getsignal(shutdown_signal)
+            signal.signal(shutdown_signal, request_shutdown)
+        except (ValueError, OSError):
+            # Signal registration is only available in the main interpreter
+            # thread and varies slightly across supported platforms.
+            pass
     try:
+        runtime_state.mark_started(VERSION, camera.mode_banner)
+        if previous_unclean:
+            log_event(logger, "previous_unclean_shutdown")
         dashboard_cfg = cfg.get("dashboard", {})
         if bool(dashboard_cfg.get("enabled", False)) and not args.no_dashboard:
             dashboard_state = DashboardState()
@@ -421,6 +481,7 @@ def main():
             dashboard_state.add_event("startup", f"Dashboard listening at {dashboard_url}")
             log_event(logger, "dashboard_started", url=dashboard_url)
         while running:
+            loop_now = time.monotonic()
             key = controls.poll()
             if key == "q":
                 running = False
@@ -456,6 +517,24 @@ def main():
                 for command in dashboard_state.drain_commands():
                     dashboard_command(command)
 
+            if loop_now - last_health_check >= float(runtime_cfg.get("health_check_seconds", 1.0)):
+                last_health_check = loop_now
+                maintained = camera.maintain_health()
+                unhealthy = [
+                    camera_id
+                    for camera_id, health in maintained.items()
+                    if health.state != CameraState.DISABLED and not health.ok
+                ]
+                if unhealthy and not camera.emergency_stopped:
+                    auto_enabled = False
+                    camera.emergency_stop()
+                    log_event(logger, "camera_health_fail_safe", camera_ids=unhealthy)
+                    if dashboard_state is not None:
+                        dashboard_state.add_event(
+                            "camera_health_fail_safe",
+                            f"Camera health failure {unhealthy}; AUTO off and STOP latched",
+                        )
+
             if hasattr(source, "read_observation"):
                 observation = source.read_observation()
                 levels = observation.levels_db
@@ -469,7 +548,7 @@ def main():
                 health = source.health(float(runtime_cfg.get("audio_stale_seconds", 1.5)))
                 if not health.ok:
                     audio_ok = False
-                    audio_warning = f"PAUSED — no audio callback for {health.stale_seconds:.1f}s"
+                    audio_warning = f"PAUSED - no audio callback for {health.stale_seconds:.1f}s"
                     if auto_enabled:
                         auto_enabled = False
                     if not stale_logged:
@@ -478,12 +557,29 @@ def main():
                         if dashboard_state is not None:
                             dashboard_state.add_event("audio_stale", audio_warning)
                         stale_logged = True
+                    reconnect_limit = int(runtime_cfg.get("audio_reconnect_attempts", 3))
+                    reconnect_interval = float(runtime_cfg.get("audio_reconnect_interval_seconds", 2.0))
+                    if (
+                        audio_reconnect_attempts < reconnect_limit
+                        and loop_now - last_audio_reconnect >= reconnect_interval
+                    ):
+                        last_audio_reconnect = loop_now
+                        audio_reconnect_attempts += 1
+                        try:
+                            source.restart()
+                            log_event(logger, "audio_reconnect_attempt", attempt=audio_reconnect_attempts, started=True)
+                        except Exception as exc:
+                            log_event(logger, "audio_reconnect_attempt", attempt=audio_reconnect_attempts, started=False, error=str(exc))
                 else:
                     if stale_logged:
                         log_event(logger, "audio_recovered")
                         if dashboard_state is not None:
                             dashboard_state.add_event("audio_recovered", "Audio callback recovered; AUTO remains off")
                     stale_logged = False
+                    callback_count = getattr(source, "callback_count", observed_callback_count)
+                    if callback_count > observed_callback_count:
+                        observed_callback_count = callback_count
+                        audio_reconnect_attempts = 0
                     if health.callback_status:
                         audio_warning = health.callback_status
 
@@ -512,6 +608,8 @@ def main():
                 warnings = []
                 if camera.real_control_enabled:
                     warnings.append("REAL PTZ CONTROL ENABLED")
+                if state_warning:
+                    warnings.append(state_warning)
                 if camera.emergency_stopped:
                     warnings.append("EMERGENCY STOP IS LATCHED")
                 if audio_warning:
@@ -587,22 +685,94 @@ def main():
                     warnings=warnings,
                 )
 
+            if loop_now - last_heartbeat >= float(runtime_cfg.get("heartbeat_seconds", 5.0)):
+                last_heartbeat = loop_now
+                try:
+                    runtime_state.heartbeat(
+                        auto_enabled=auto_enabled,
+                        audio_ok=audio_ok,
+                        camera_states={camera_id: health.state.value for camera_id, health in camera.health_all().items()},
+                    )
+                except OSError as exc:
+                    state_warning = f"Runtime heartbeat write failed: {exc}"
+                    log_event(logger, "heartbeat_write_failed", error=str(exc))
+
             render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning, dashboard_url)
             time.sleep(0.1)
     except KeyboardInterrupt:
-        pass
+        log_event(logger, "shutdown_requested", signal="KeyboardInterrupt")
     finally:
+        for shutdown_signal, previous_handler in prior_signal_handlers.items():
+            try:
+                signal.signal(shutdown_signal, previous_handler)
+            except (ValueError, OSError):
+                pass
         if needs_stop:
-            source.stop()
-        camera.emergency_stop()
-        camera.disconnect_all()
-        if dashboard_state is not None:
-            dashboard_state.add_event("shutdown", "SPEAKERPTZ shutting down")
-        if dashboard_server is not None:
-            dashboard_server.stop()
-        log_event(logger, "shutdown")
+            try:
+                source.stop()
+            except Exception as exc:
+                log_event(logger, "audio_shutdown_failed", error=str(exc))
+        try:
+            camera.emergency_stop()
+        except Exception as exc:
+            log_event(logger, "camera_stop_on_shutdown_failed", error=str(exc))
+        try:
+            camera.disconnect_all()
+        except Exception as exc:
+            log_event(logger, "camera_disconnect_on_shutdown_failed", error=str(exc))
+        try:
+            if dashboard_state is not None:
+                dashboard_state.add_event("shutdown", "SPEAKERPTZ shutting down")
+            if dashboard_server is not None:
+                dashboard_server.stop()
+        except Exception as exc:
+            log_event(logger, "dashboard_shutdown_failed", error=str(exc))
+        try:
+            runtime_state.mark_clean_shutdown()
+        except OSError as exc:
+            log_event(logger, "clean_shutdown_state_failed", error=str(exc))
+        finally:
+            instance_lock.release()
+        log_event(logger, "shutdown", clean=True)
         print("\nStopped.")
 
 
+def _classified_exit_code(message: str) -> int:
+    upper = message.upper()
+    if upper.startswith("CONFIG ERROR"):
+        return 2
+    if upper.startswith(("AUDIO DEVICE ERROR", "CHANNEL IDENTIFIER")):
+        return 3
+    if upper.startswith(("CAMERA ", "CAMERA PROBE", "CAMERA TEST")):
+        return 4
+    if upper.startswith("DASHBOARD STARTUP ERROR"):
+        return 5
+    if upper.startswith("INSTANCE ERROR"):
+        return 6
+    return 1
+
+
+def cli() -> int:
+    # Redirected Windows PowerShell output commonly uses a legacy code page.
+    # Never let a device name or operator-facing message crash the controller.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+    try:
+        main()
+        return 0
+    except SystemExit as exc:
+        if isinstance(exc.code, int):
+            return exc.code
+        message = str(exc.code or "")
+        if message:
+            print(message, file=sys.stderr)
+        return _classified_exit_code(message)
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(cli())

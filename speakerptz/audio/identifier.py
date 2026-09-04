@@ -42,7 +42,7 @@ def run_identifier(device_index: int, channels: int, sample_rate: int, device_la
             for idx, db in enumerate(levels, start=1):
                 bars = max(0, min(32, int((db + 80) / 2)))
                 marker = "  < PEAK" if best == idx - 1 and db > -55 else ""
-                print(f"PHYS {idx:02d}  {db:6.1f} dB | {'█' * bars}{marker}")
+                print(f"PHYS {idx:02d}  {db:6.1f} dB | {'#' * bars}{marker}")
             health = source.health()
             if not health.ok:
                 print(f"\nAUDIO WARNING: no callback for {health.stale_seconds:.1f}s")

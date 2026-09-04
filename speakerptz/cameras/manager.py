@@ -56,6 +56,8 @@ class CameraManager:
         movement_cooldown_seconds: float = 0.75,
         retry_count: int = 1,
         retry_backoff_seconds: float = 0.10,
+        reconnect_interval_seconds: float = 2.0,
+        reconnect_attempt_limit: int = 3,
         logger=None,
         clock=None,
         sleeper=None,
@@ -67,6 +69,8 @@ class CameraManager:
         self.movement_cooldown_seconds = max(0.0, float(movement_cooldown_seconds))
         self.retry_count = max(0, min(3, int(retry_count)))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self.reconnect_interval_seconds = max(0.1, float(reconnect_interval_seconds))
+        self.reconnect_attempt_limit = max(0, min(10, int(reconnect_attempt_limit)))
         self.logger = logger
         self._clock = clock or time.monotonic
         self._sleep = sleeper or time.sleep
@@ -74,6 +78,8 @@ class CameraManager:
         self._drivers: dict[int, CameraDriver] = {}
         self._last_command_at: dict[int, float] = {}
         self._last_global_command_at: float | None = None
+        self._last_reconnect_at: dict[int, float] = {}
+        self._reconnect_attempts: dict[int, int] = {}
         self._lock = threading.RLock()
         self.emergency_stopped = False
         self.last_action = "No camera request yet"
@@ -92,6 +98,8 @@ class CameraManager:
             movement_cooldown_seconds=float(control.get("movement_cooldown_seconds", 0.75)),
             retry_count=int(control.get("retry_count", 1)),
             retry_backoff_seconds=float(control.get("retry_backoff_seconds", 0.10)),
+            reconnect_interval_seconds=float(control.get("reconnect_interval_seconds", 2.0)),
+            reconnect_attempt_limit=int(control.get("reconnect_attempt_limit", 3)),
         )
         kwargs.update(overrides)
         return cls(camera_configs_from_data(data), **kwargs)
@@ -174,6 +182,41 @@ class CameraManager:
 
     def health_all(self) -> dict[int, CameraHealth]:
         return {camera_id: self.health(camera_id) for camera_id in sorted(self.configs)}
+
+    def maintain_health(self) -> dict[int, CameraHealth]:
+        """Perform bounded, paced reconnect attempts for unhealthy cameras."""
+        now = self._clock()
+        results = self.health_all()
+        for camera_id, health in list(results.items()):
+            if health.state == CameraState.DISABLED:
+                continue
+            if health.ok:
+                self._reconnect_attempts[camera_id] = 0
+                continue
+            attempts = self._reconnect_attempts.get(camera_id, 0)
+            last = self._last_reconnect_at.get(camera_id)
+            if attempts >= self.reconnect_attempt_limit:
+                continue
+            if last is not None and now - last < self.reconnect_interval_seconds:
+                continue
+            self._last_reconnect_at[camera_id] = now
+            self._reconnect_attempts[camera_id] = attempts + 1
+            driver = self._drivers.get(camera_id)
+            if driver is not None:
+                try:
+                    driver.disconnect()
+                except Exception:
+                    pass
+            results[camera_id] = self.connect(camera_id)
+            self._log(
+                "camera_reconnect",
+                camera_id=camera_id,
+                attempt=self._reconnect_attempts[camera_id],
+                success=results[camera_id].ok,
+            )
+            if results[camera_id].ok:
+                self._reconnect_attempts[camera_id] = 0
+        return results
 
     def _run_with_retries(self, camera_id: int, action: str, operation) -> CameraCommandResult:
         attempts = 0
