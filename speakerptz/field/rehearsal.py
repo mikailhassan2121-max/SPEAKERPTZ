@@ -244,7 +244,9 @@ def run_automated_scenarios(*, channels: int = 4, seed: int = 0) -> dict[str, Ch
         detector.reason,
     )
 
-    # -- manual AUTO OFF: mirror main.py's own `if auto_enabled and event:` gate.
+    # -- manual AUTO OFF: mirror main.py's own `if auto_enabled and event:` gate,
+    # and prove the assertion is non-vacuous by exercising both branches --
+    # a move must happen when AUTO is on, and must not when it is off.
     detector = new_detector()
     t = 0.0
     fired_event = None
@@ -256,26 +258,31 @@ def run_automated_scenarios(*, channels: int = 4, seed: int = 0) -> dict[str, Ch
             fired_event = step_event
     speech_detected = fired_event is not None and fired_event[0] == "speaker"
 
-    auto_manager = CameraManager(
-        [CameraConfig(1, "Rehearsal simulator (manual)")],
-        real_control_enabled=False,
-        command_interval_seconds=0.0,
-        movement_cooldown_seconds=0.0,
-    )
-    auto_manager.connect_all()
-    auto_enabled = False  # operator has disabled AUTO
-    if auto_enabled and fired_event:
-        auto_manager.goto_preset(1, fired_event[1], "auto")
-    moved = auto_manager.current_presets.get(1) is not None
-    auto_manager.disconnect_all()
-    ok = speech_detected and not moved
+    def dispatch(auto_enabled: bool) -> bool:
+        manager = CameraManager(
+            [CameraConfig(1, "Rehearsal simulator (manual)")],
+            real_control_enabled=False,
+            command_interval_seconds=0.0,
+            movement_cooldown_seconds=0.0,
+        )
+        manager.connect_all()
+        if auto_enabled and fired_event:
+            manager.goto_preset(1, fired_event[1], "auto")
+        moved = manager.current_presets.get(1) is not None
+        manager.disconnect_all()
+        return moved
+
+    moved_when_on = dispatch(auto_enabled=True)
+    moved_when_off = dispatch(auto_enabled=False)
+    ok = speech_detected and moved_when_on and not moved_when_off
     results["manual_auto_off"] = CheckResult(
         "manual_auto_off",
         SCENARIOS_BY_KEY["manual_auto_off"].label,
         StepStatus.PASS if ok else StepStatus.FAIL,
-        "Speech was detected but AUTO OFF correctly withheld any camera command."
+        "Speech was detected; the same event moved the camera with AUTO on and was correctly "
+        "withheld with AUTO off."
         if ok
-        else "A camera command was issued while AUTO was off.",
+        else "AUTO on/off did not correctly gate the camera command.",
     )
 
     # -- audio dropout: exercised through detector.update(None-safe) --------

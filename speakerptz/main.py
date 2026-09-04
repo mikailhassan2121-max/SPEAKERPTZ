@@ -289,8 +289,12 @@ def main():
         raise SystemExit(0 if not failed else 1)
 
     if args.field_confirm:
+        from .field.models import CONFIRMABLE_KEYS
         from .field.record import FieldRecord
 
+        if args.field_confirm not in CONFIRMABLE_KEYS:
+            accepted = ", ".join(sorted(CONFIRMABLE_KEYS))
+            raise SystemExit(f"FIELD CONFIRM ERROR: unknown key '{args.field_confirm}'. Accepted values: {accepted}.")
         if not args.operator:
             raise SystemExit("FIELD CONFIRM ERROR: --operator is required for a human confirmation.")
         record = FieldRecord(args.field_record)
@@ -377,8 +381,9 @@ def main():
 
     if args.calibrate:
         from .field.mapping import plan_from_config
+        from .field.models import StepStatus
         from .field.record import FieldRecord
-        from .field.wizard import WizardIO, guided_calibration
+        from .field.wizard import WizardIO, guided_calibration, real_source_factory
 
         try:
             if requested_sim:
@@ -387,11 +392,15 @@ def main():
             if not plan.seats:
                 raise SystemExit("CALIBRATION requires people/seats to already be mapped in configuration.")
             io = WizardIO()
-            calibration = guided_calibration(cfg, plan.seats, io)
+            calibration = guided_calibration(
+                cfg, plan.seats, io, source_factory=real_source_factory(cfg, len(plan.seats))
+            )
             record = FieldRecord(args.field_record)
             if args.operator:
                 record.set_session(operator=args.operator)
             record.record_calibration(calibration.to_dict())
+            status = StepStatus.PASS if calibration.complete else StepStatus.WARN
+            record.record_step("mic_calibration", status, f"{len(calibration.warnings)} warning(s).")
             raise SystemExit(0 if calibration.complete else 1)
         finally:
             instance_lock.release()

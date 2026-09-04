@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+# Every key a human confirmation can legitimately be recorded under, shared by
+# the wizard, the --field-confirm CLI flag, and the readiness report. Keeping
+# this in one place prevents the confirming writer and the reading reader
+# from silently drifting onto different key spellings.
+CONFIRMABLE_KEYS = frozenset(
+    {"no_live_meeting", "real_control_off", "manual_override", "physical_joystick", "real_ptz_rehearsal"}
+)
+
+
 class StepStatus(str, Enum):
     """Field-check outcome.
 

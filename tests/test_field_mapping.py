@@ -220,6 +220,59 @@ def test_apply_calibration_can_opt_into_bleed_pairs():
     assert updated["audio"]["bleed_pairs"] == [[1, 2]]
 
 
+def test_apply_calibration_drops_stale_length_level_offsets(tmp_path):
+    """Regression guard: a calibration frozen against an old seat count must
+    never write a level_offsets_db whose length disagrees with the config it
+    is being applied to -- validate_config rejects that and the resulting
+    config/local.yaml becomes unloadable by every field tool.
+    """
+    cfg = _base_config()
+    cfg["audio"]["channels"] = 5  # seat count changed after calibration ran
+    cfg["audio"]["channel_map"] = [1, 2, 3, 4, 5]
+    cfg["audio"]["level_offsets_db"] = [0.0] * 5  # apply_plan already resized this correctly
+
+    class FakeCalibration:
+        # Frozen from a 4-seat calibration session.
+        recommended = {"level_offsets_db": [1.0, -1.0, 0.0, 0.0]}
+
+    updated = apply_calibration(cfg, FakeCalibration())
+    # The stale 4-length recommendation was not applied; the caller's
+    # already-correct 5-length offsets are left untouched.
+    assert updated["audio"]["level_offsets_db"] == [0.0] * 5
+    validate_config(updated)
+
+
+def test_apply_calibration_drops_stale_disabled_channels_and_bleed_pairs():
+    cfg = _base_config()
+    cfg["audio"]["channels"] = 2
+    cfg["audio"]["channel_map"] = [1, 2]
+    cfg["audio"]["level_offsets_db"] = [0.0, 0.0]
+    cfg["people"] = [
+        {"mic_channel": 1, "name": "Seat 1", "camera": 1, "preset": 1},
+        {"mic_channel": 2, "name": "Seat 2", "camera": 1, "preset": 2},
+    ]
+
+    class FakeCalibration:
+        # Frozen from a session where channels 3/4 still existed.
+        recommended = {"disabled_channels": [3], "bleed_pairs": [[3, 4]]}
+
+    updated = apply_calibration(cfg, FakeCalibration(), apply_bleed=True)
+    assert updated["audio"]["disabled_channels"] == []
+    assert updated["audio"]["bleed_pairs"] == []
+    validate_config(updated)
+
+
+def test_apply_calibration_still_applies_offsets_matching_current_channel_count():
+    cfg = _base_config()  # 4 channels
+
+    class FakeCalibration:
+        recommended = {"level_offsets_db": [1.0, -1.0, 0.5, 0.0]}
+
+    updated = apply_calibration(cfg, FakeCalibration())
+    assert updated["audio"]["level_offsets_db"] == [1.0, -1.0, 0.5, 0.0]
+    validate_config(updated)
+
+
 def test_set_camera_entry_inserts_and_replaces():
     cfg = _base_config()
     updated = set_camera_entry(cfg, {"id": 2, "name": "Camera 2", "driver": "simulator", "enabled": True})

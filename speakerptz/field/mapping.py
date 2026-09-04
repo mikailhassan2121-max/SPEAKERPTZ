@@ -301,22 +301,41 @@ def apply_plan(cfg: dict, plan: FieldPlan) -> dict:
 
 
 def apply_calibration(cfg: dict, calibration, *, apply_offsets: bool = True, apply_bleed: bool = False) -> dict:
-    """Return a copy of cfg with reviewed calibration values applied."""
+    """Return a copy of cfg with reviewed calibration values applied.
+
+    A `calibration.recommended` payload is frozen at the moment calibration
+    ran, against however many seats were mapped at that time. If the seat
+    count has since changed (e.g. the operator went back and added a seat),
+    any recommendation that is keyed by channel count or number is silently
+    dropped here rather than written -- otherwise it can produce a
+    config.local.yaml that load_config immediately rejects.
+    """
     updated = copy.deepcopy(cfg)
     audio = updated.setdefault("audio", {})
     recommended = dict(getattr(calibration, "recommended", {}) or {})
+    channels = int(audio.get("channels") or len(audio.get("channel_map") or []) or 0)
+
     for key in ("absolute_threshold_db", "signal_margin_db"):
         if key in recommended:
             audio[key] = recommended[key]
     if apply_offsets and "level_offsets_db" in recommended:
-        audio["level_offsets_db"] = list(recommended["level_offsets_db"])
+        offsets = list(recommended["level_offsets_db"])
+        if not channels or len(offsets) == channels:
+            audio["level_offsets_db"] = offsets
     if "disabled_channels" in recommended:
+        stale_safe = {
+            int(value) for value in recommended["disabled_channels"] if not channels or 1 <= int(value) <= channels
+        }
         audio["disabled_channels"] = sorted(
-            {int(value) for value in audio.get("disabled_channels", []) or []}
-            | {int(value) for value in recommended["disabled_channels"]}
+            {int(value) for value in audio.get("disabled_channels", []) or []} | stale_safe
         )
     if apply_bleed and "bleed_pairs" in recommended:
-        audio["bleed_pairs"] = [list(pair) for pair in recommended["bleed_pairs"]]
+        stale_safe_pairs = [
+            list(pair)
+            for pair in recommended["bleed_pairs"]
+            if not channels or all(1 <= int(value) <= channels for value in pair)
+        ]
+        audio["bleed_pairs"] = stale_safe_pairs
     return updated
 
 

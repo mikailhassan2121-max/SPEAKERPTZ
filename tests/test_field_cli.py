@@ -65,6 +65,25 @@ def test_field_confirm_cli_requires_operator(tmp_path, monkeypatch):
     assert "operator" in str(exc.code).lower()
 
 
+def test_field_confirm_cli_rejects_unknown_key(tmp_path, monkeypatch):
+    exc = _run_main(
+        monkeypatch,
+        [
+            "--field-confirm", "physical_jostick",  # typo: missing 'y'
+            "--operator", "Jamie Lee",
+            "--field-record", str(tmp_path / "field.json"),
+        ],
+    )
+    assert "unknown key" in str(exc.code).lower()
+    assert "physical_joystick" in str(exc.code)  # accepted values are listed
+
+    from speakerptz.field.record import FieldRecord
+
+    record = FieldRecord(str(tmp_path / "field.json"))
+    assert not record.is_confirmed("physical_jostick")
+    assert not record.is_confirmed("physical_joystick")
+
+
 def test_field_confirm_cli_records_confirmation(tmp_path, monkeypatch, capsys):
     record_path = tmp_path / "field.json"
     monkeypatch.setattr(
@@ -96,6 +115,50 @@ def test_calibrate_cli_flag_requires_real_mode(tmp_path, monkeypatch):
         ["--config", str(cfg_path), "--calibrate", "--field-record", str(tmp_path / "field.json")],
     )
     assert "real audio device" in str(exc.code)
+
+
+def test_calibrate_cli_flag_wires_a_real_source_factory_not_the_simulator(tmp_path, monkeypatch):
+    """Regression guard: --calibrate must capture real DVS/Dante audio in real mode.
+
+    guided_calibration silently defaults to SimulatedAudioSource whenever it
+    receives source_factory=None, so the --calibrate CLI path must always
+    pass a real_source_factory(...) result when runtime.mode is not simulate.
+    """
+    import speakerptz.field.wizard as wizard_module
+
+    cfg = yaml.safe_load(open("config/room.yaml", encoding="utf-8"))
+    cfg["runtime"]["mode"] = "real"
+    cfg["runtime"]["log_dir"] = str(tmp_path / "logs")
+    cfg["runtime"]["instance_lock_file"] = str(tmp_path / "speakerptz.lock")
+    cfg["runtime"]["state_file"] = str(tmp_path / "runtime-state.json")
+    cfg_path = tmp_path / "local.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    sentinel_factory = object()
+    factory_calls = []
+
+    def fake_real_source_factory(passed_cfg, channels):
+        factory_calls.append((passed_cfg, channels))
+        return sentinel_factory
+
+    calibration_calls = []
+
+    def fake_guided_calibration(passed_cfg, seats, io, *, source_factory=None, **kwargs):
+        calibration_calls.append(source_factory)
+        from speakerptz.field.calibration import RoomCalibration
+
+        return RoomCalibration((), None, (), (), (), {}, ())
+
+    monkeypatch.setattr(wizard_module, "real_source_factory", fake_real_source_factory)
+    monkeypatch.setattr(wizard_module, "guided_calibration", fake_guided_calibration)
+    monkeypatch.setattr(sys, "argv", ["speakerptz", "--config", str(cfg_path), "--calibrate"])
+
+    with pytest.raises(SystemExit):
+        main_module.main()
+
+    assert len(factory_calls) == 1
+    assert factory_calls[0][1] == 4  # 4 seats in config/room.yaml's people section
+    assert calibration_calls == [sentinel_factory]  # not None -- the simulator was never opted into
 
 
 def test_field_setup_cli_flag_runs_and_exits_cleanly(tmp_path, monkeypatch, capsys):

@@ -129,7 +129,134 @@ def test_guided_calibration_runs_against_simulated_source_with_injected_clock():
     assert result.channels  # produced a row per seat
 
 
+def test_guided_calibration_stops_a_stoppable_source_even_on_error():
+    from speakerptz.field.models import SeatAssignment
+
+    seats = [SeatAssignment(1, 5, "Board Chair", 1, 1)]
+    io, _log = _scripted_io([""])
+    fake_time = [0.0]
+    stopped = []
+
+    def clock():
+        fake_time[0] += 1.0
+        return fake_time[0]
+
+    class _StoppableSource:
+        def read_observation(self):
+            from speakerptz.audio.vad import AudioObservation
+
+            return AudioObservation([-20.0], [0.9])
+
+        def stop(self):
+            stopped.append(True)
+
+    result = guided_calibration(
+        {},
+        seats,
+        io,
+        source_factory=lambda: _StoppableSource(),
+        quiet_seconds=0.5,
+        speech_seconds=0.5,
+        frame_delay=0.0,
+        clock=clock,
+    )
+    assert result.channels
+    assert stopped == [True]
+
+
+def test_guided_calibration_stops_source_even_when_session_raises():
+    from speakerptz.field.models import SeatAssignment
+
+    stopped = []
+
+    class _StoppableSource:
+        def read_observation(self):
+            raise RuntimeError("simulated audio failure")
+
+        def stop(self):
+            stopped.append(True)
+
+    io, _log = _scripted_io([])
+    with pytest.raises(RuntimeError):
+        guided_calibration(
+            {},
+            [SeatAssignment(1, 5, "Board Chair", 1, 1)],
+            io,
+            source_factory=lambda: _StoppableSource(),
+            quiet_seconds=0.5,
+            speech_seconds=0.5,
+            frame_delay=0.0,
+            clock=lambda: 0.0,
+        )
+    assert stopped == [True]
+
+
 # ---- run_field_setup: end-to-end scripted session -------------------------
+
+
+def test_run_field_setup_reentering_seat_mapping_preserves_wide_shot(tmp_path):
+    cfg_path = tmp_path / "local.yaml"
+    shutil.copy("config/room.yaml", cfg_path)
+    record = FieldRecord(str(tmp_path / "field.json"))
+
+    io, _log = _scripted_io(
+        [
+            "F",
+            "5 Board Chair",
+            "",
+            "1 20",  # wide shot set on first pass
+            "F",
+            "6 Vice Chair",
+            "",
+            "",  # blank: keep the existing wide shot, don't clear it
+            "X",
+        ]
+    )
+    run_field_setup(str(cfg_path), operator="Jamie Lee", io=io, record=record)
+    plan = record.plan
+    assert plan is not None
+    assert len(plan["seats"]) == 2
+    assert plan["wide_shot"] == {"camera": 1, "preset": 20}
+
+
+def test_run_field_setup_calibration_step_satisfies_readiness_mic_calibration_row(tmp_path, monkeypatch):
+    from speakerptz.field import wizard as wizard_module
+    from speakerptz.field.calibration import ChannelCalibration, RoomCalibration
+    from speakerptz.field.readiness import build_readiness_report
+
+    # guided_calibration's own real-time pacing is exercised by
+    # test_guided_calibration_*; here only the dispatch logic in
+    # run_field_setup's "calibration" branch is under test, so stub the
+    # (slow, real-time) collection loop with a fast canned WARN result.
+    warn_result = RoomCalibration(
+        channels=(
+            ChannelCalibration(1, 5, "Board Chair", -60.0, -20.0, 40.0, 10, 10, "ok"),
+            ChannelCalibration(2, 6, "Vice Chair", -60.0, None, None, 10, 0, "no_speech"),
+        ),
+        room_noise_floor_db=-60.0,
+        suspected_bleed_pairs=(),
+        dead_channels=(),
+        unverified_channels=(2,),
+        recommended={},
+        warnings=("Channels without a verified speech sample: 2",),
+    )
+    monkeypatch.setattr(wizard_module, "guided_calibration", lambda *a, **k: warn_result)
+
+    cfg_path = tmp_path / "local.yaml"
+    shutil.copy("config/room.yaml", cfg_path)
+    record = FieldRecord(str(tmp_path / "field.json"))
+
+    io, _log = _scripted_io(["F", "5 Board Chair", "6 Vice Chair", "", "1 20", "G", "X"])
+    run_field_setup(str(cfg_path), operator="Jamie Lee", io=io, record=record)
+
+    assert record.step_status("mic_calibration") is StepStatus.WARN
+
+    report = build_readiness_report(str(cfg_path), field_record=record, include_camera_connectivity=False)
+    mic_calibration_row = next(r for r in report.rows if r.key == "mic_calibration")
+    # Regression guard for the wizard/readiness key mismatch: a WARN recorded
+    # by the wizard must show up as WARN here, never silently promoted to PASS.
+    assert mic_calibration_row.status is StepStatus.WARN
+    assert mic_calibration_row.detail != "Calibration data recorded."
 
 
 def test_run_field_setup_end_to_end(tmp_path):

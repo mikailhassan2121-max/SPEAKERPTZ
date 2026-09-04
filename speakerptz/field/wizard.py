@@ -15,7 +15,7 @@ from .mapping import (
     validate_plan,
     write_config,
 )
-from .models import FieldPlan, SeatAssignment, StepStatus, WideShotAssignment
+from .models import CONFIRMABLE_KEYS, FieldPlan, SeatAssignment, StepStatus, WideShotAssignment
 from .readiness import build_readiness_report, render_readiness
 from .record import FieldRecord
 from .rehearsal import render_rehearsal, run_automated_scenarios
@@ -47,7 +47,10 @@ FLOW_STEPS: tuple[tuple[str, str, str], ...] = (
     ("S", "readiness_report", "Generate the final setup/readiness report"),
 )
 
-HUMAN_ONLY_STEPS = {"no_live_meeting", "real_control_off", "physical_joystick", "real_ptz_rehearsal"}
+# "manual_override" is confirmed inline within the rehearsal_edge_cases (P)
+# handler rather than through the generic yes/no prompt below, since it is not
+# itself a FLOW_STEPS menu letter.
+HUMAN_ONLY_STEPS = CONFIRMABLE_KEYS - {"manual_override"}
 
 
 @dataclass
@@ -177,22 +180,27 @@ def guided_calibration(
     io.say("ROOM CALIBRATION")
     io.say(f"Stay quiet for {quiet_seconds:.0f} seconds to sample the room noise floor...")
     source = source_factory()
-    started = clock()
-    while clock() - started < quiet_seconds:
-        session.add_noise_frame(source.read_observation().levels_db)
-        time.sleep(frame_delay)
-    io.say(f"Captured {session.noise_frame_count} quiet-room frame(s).")
-
-    for seat in seats:
-        io.prompt(
-            f"Press Enter, then speak continuously into '{seat.name}' "
-            f"(mic {seat.logical_channel} / DVS input {seat.physical_input}) for {speech_seconds:.0f}s> "
-        )
+    try:
         started = clock()
-        while clock() - started < speech_seconds:
-            session.add_speech_frame(seat.logical_channel, source.read_observation().levels_db)
+        while clock() - started < quiet_seconds:
+            session.add_noise_frame(source.read_observation().levels_db)
             time.sleep(frame_delay)
-        io.say(f"  Captured {session.speech_frame_count(seat.logical_channel)} speech frame(s).")
+        io.say(f"Captured {session.noise_frame_count} quiet-room frame(s).")
+
+        for seat in seats:
+            io.prompt(
+                f"Press Enter, then speak continuously into '{seat.name}' "
+                f"(mic {seat.logical_channel} / DVS input {seat.physical_input}) for {speech_seconds:.0f}s> "
+            )
+            started = clock()
+            while clock() - started < speech_seconds:
+                session.add_speech_frame(seat.logical_channel, source.read_observation().levels_db)
+                time.sleep(frame_delay)
+            io.say(f"  Captured {session.speech_frame_count(seat.logical_channel)} speech frame(s).")
+    finally:
+        stop = getattr(source, "stop", None)
+        if stop is not None:
+            stop()
 
     result = session.result()
     io.say("")
@@ -245,7 +253,7 @@ def run_field_setup(config_path: str, *, operator: str, io: WizardIO | None = No
             continue
         _, key, _description = matched
 
-        if key in {"no_live_meeting", "real_control_off", "physical_joystick", "real_ptz_rehearsal"}:
+        if key in HUMAN_ONLY_STEPS:
             answer = io.prompt("Type 'yes' once this has been physically verified> ").strip().lower()
             if answer == "yes":
                 record.confirm(key, operator=operator)
@@ -279,11 +287,17 @@ def run_field_setup(config_path: str, *, operator: str, io: WizardIO | None = No
 
         if key == "seat_mapping":
             existing_plan = record.plan
-            plan = guided_seat_mapping(
-                io, FieldPlan(seats=[SeatAssignment.from_dict(s) for s in existing_plan["seats"]])
+            existing_field_plan = (
+                FieldPlan(
+                    seats=[SeatAssignment.from_dict(s) for s in existing_plan["seats"]],
+                    wide_shot=WideShotAssignment(**existing_plan["wide_shot"])
+                    if existing_plan.get("wide_shot")
+                    else None,
+                )
                 if existing_plan
-                else None,
+                else None
             )
+            plan = guided_seat_mapping(io, existing_field_plan)
             record.record_plan(plan.to_dict())
             status = StepStatus.PASS if plan.seats else StepStatus.NOT_COMPLETED
             record.record_step(key, status, f"{len(plan.seats)} seat(s) mapped.")
@@ -298,10 +312,13 @@ def run_field_setup(config_path: str, *, operator: str, io: WizardIO | None = No
             simulate = bool(cfg and cfg.get("runtime", {}).get("mode") != "real")
             source_factory = None
             if not simulate and cfg is not None:
-                source_factory = _real_source_factory(cfg, len(seats))
+                source_factory = real_source_factory(cfg, len(seats))
             calibration = guided_calibration(cfg or {}, seats, io, source_factory=source_factory)
             record.record_calibration(calibration.to_dict())
             status = StepStatus.PASS if calibration.complete else StepStatus.WARN
+            # readiness.py's "Mic calibration" row reads the "mic_calibration" key
+            # specifically -- it must match, or a WARN here silently reads back as PASS.
+            record.record_step("mic_calibration", status, f"{len(calibration.warnings)} warning(s).")
             record.record_step(key, status, f"{len(calibration.warnings)} warning(s).")
             continue
 
@@ -455,7 +472,7 @@ def _guided_camera_entry(io: WizardIO) -> dict | None:
     return entry
 
 
-def _real_source_factory(cfg: dict, channels: int):
+def real_source_factory(cfg: dict, channels: int):
     from speakerptz.audio.channelmap import required_physical_channels
     from speakerptz.audio.devices import resolve_input_device
     from speakerptz.audio.realtime import RealAudioSource
