@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import yaml
 from .models import PersonRoute
+from speakerptz.audio.channelmap import normalize_channel_map
 
 
 class ConfigError(ValueError):
@@ -30,6 +31,11 @@ def validate_config(data: dict) -> None:
         raise ConfigError("Missing wide_shot section.")
 
     channels = _require_int(data["audio"], "channels", 1)
+    try:
+        normalize_channel_map(data["audio"].get("channel_map"), channels)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
     seen = set()
     for p in data["people"]:
         if not isinstance(p, dict):

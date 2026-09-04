@@ -5,6 +5,7 @@ import os
 import time
 
 from .audio.simulator import SimulatedAudioSource
+from .audio.channelmap import normalize_channel_map, required_physical_channels
 from .audio.devices import resolve_input_device
 from .cameras.simulator import SimulatorCamera
 from .core.config import load_config, ConfigError
@@ -12,7 +13,7 @@ from .core.detector import ActiveSpeakerDetector
 from .runtime.logging import setup_logging, event as log_event
 
 
-VERSION = "0.4"
+VERSION = "0.5"
 
 
 class ConsoleControls:
@@ -30,26 +31,31 @@ class ConsoleControls:
             return None
 
 
-def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""):
+def render(levels, detector, routes, mode, auto_enabled, camera, device_label="", channel_map=None, audio_warning=""):
     os.system("cls" if os.name == "nt" else "clear")
     snap = detector.snapshot()
     print(f"SPEAKERPTZ v{VERSION}")
-    print("=" * 96)
+    print("=" * 104)
 
     if snap.calibrating:
         print(f"CALIBRATING ROOM NOISE: {snap.calibration_remaining:0.1f}s remaining — stay quiet")
-        print("-" * 96)
+        print("-" * 104)
 
+    channel_map = channel_map or list(range(1, len(levels) + 1))
     for idx, db in enumerate(levels, start=1):
         route = routes.get(idx)
         name = route.name if route else f"Mic {idx}"
+        physical = channel_map[idx - 1] if idx - 1 < len(channel_map) else idx
         bars = max(0, min(24, int((db + 70) / 2)))
         floor = snap.noise_floors[idx - 1] if idx - 1 < len(snap.noise_floors) else None
         snr = snap.snr_db[idx - 1] if idx - 1 < len(snap.snr_db) else None
         marker = "  < ACTIVE" if detector.active == idx else ""
         floor_text = f"floor {floor:6.1f}" if floor is not None else "floor   --.-"
         snr_text = f"+{snr:4.1f}" if snr is not None and snr >= 0 else (f"{snr:5.1f}" if snr is not None else "  --.-")
-        print(f"CH {idx:02d}  {name[:20]:20} {db:6.1f} dB | {floor_text} | SNR {snr_text} | {'█' * bars}{marker}")
+        print(
+            f"MIC {idx:02d} <- IN {physical:02d} | {name[:18]:18} {db:6.1f} dB | "
+            f"{floor_text} | SNR {snr_text} | {'█' * bars}{marker}"
+        )
 
     print()
     if detector.active and detector.active in routes:
@@ -65,6 +71,8 @@ def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""
     print(f"MODE: {mode}")
     if device_label:
         print(f"AUDIO DEVICE: {device_label}")
+    if audio_warning:
+        print(f"AUDIO FAIL-SAFE: {audio_warning}")
     print("CAMERA CONTROL: SIMULATION ONLY (SAFE DRY RUN)")
     print(f"LAST CAMERA REQUEST: {camera.last_action}")
     print("LOGGING: ON -> logs\\speakerptz-YYYYMMDD.log")
@@ -93,14 +101,18 @@ def main():
     parser.add_argument("--simulate", action="store_true", help="Use simulated multichannel audio")
     parser.add_argument("--device", type=int, help="sounddevice input device index for real-audio mode")
     parser.add_argument("--device-name", help="case-insensitive substring of Windows audio input device name")
-    parser.add_argument("--channels", type=int, help="Override input channel count")
+    parser.add_argument("--channels", type=int, help="Override logical input channel count")
     parser.add_argument("--list-devices", action="store_true", help="Print audio devices and exit")
     parser.add_argument("--doctor", action="store_true", help="Run startup self-test and exit")
+    parser.add_argument("--identify-channels", action="store_true", help="Meter raw physical inputs to identify DVS/Dante channel numbers")
+    parser.add_argument("--identify-count", type=int, help="Physical input count to open in identifier mode")
     args = parser.parse_args()
 
     if args.list_devices:
-        import sounddevice as sd
-        print(sd.query_devices())
+        from .audio.devices import list_input_devices
+        for d in list_input_devices():
+            api = f" | {d.hostapi_name}" if d.hostapi_name else ""
+            print(f"{d.index:>3} | {d.max_input_channels:>2} in | {d.name}{api}")
         return
 
     if args.doctor:
@@ -116,6 +128,32 @@ def main():
     runtime_cfg = cfg.get("runtime", {})
     channels = int(args.channels or audio_cfg["channels"])
     sample_rate = int(audio_cfg.get("sample_rate", 48000))
+    channel_map = normalize_channel_map(audio_cfg.get("channel_map"), channels)
+    physical_needed = required_physical_channels(channel_map)
+
+    requested_sim = args.simulate or runtime_cfg.get("mode", "real") == "simulate"
+    device_index = args.device if args.device is not None else runtime_cfg.get("device_index")
+    device_name = args.device_name or runtime_cfg.get("device_name")
+    hostapi_name = runtime_cfg.get("hostapi_name")
+
+    if args.identify_channels:
+        if requested_sim:
+            raise SystemExit("CHANNEL IDENTIFIER requires a real audio device; set runtime.mode: real.")
+        count = int(args.identify_count or audio_cfg.get("identifier_channels") or physical_needed)
+        try:
+            match = resolve_input_device(
+                device_index=device_index,
+                device_name=device_name,
+                channels=count,
+                hostapi_name=hostapi_name,
+            )
+            import sounddevice as sd
+            sd.check_input_settings(device=match.index, channels=count, samplerate=sample_rate)
+        except Exception as exc:
+            raise SystemExit(f"AUDIO DEVICE ERROR: {exc}")
+        from .audio.identifier import run_identifier
+        run_identifier(match.index, count, sample_rate, f"{match.index} | {match.name}")
+        return
 
     logger = setup_logging(str(runtime_cfg.get("log_dir", "logs")))
     camera = SimulatorCamera()
@@ -123,34 +161,45 @@ def main():
     wide = cfg["wide_shot"]
     controls = ConsoleControls()
     auto_enabled = bool(runtime_cfg.get("auto_start", True))
-
-    requested_sim = args.simulate or runtime_cfg.get("mode", "real") == "simulate"
     device_label = ""
+    audio_warning = ""
+    stale_logged = False
 
     if requested_sim:
         source = SimulatedAudioSource(channels)
         mode = "SIMULATION"
         needs_stop = False
-        log_event(logger, "startup", version=VERSION, mode=mode, channels=channels)
+        log_event(logger, "startup", version=VERSION, mode=mode, channels=channels, channel_map=channel_map)
     else:
         import sounddevice as sd
         from .audio.realtime import RealAudioSource
-        device_index = args.device if args.device is not None else runtime_cfg.get("device_index")
-        device_name = args.device_name or runtime_cfg.get("device_name")
         try:
-            match = resolve_input_device(device_index=device_index, device_name=device_name, channels=channels)
-            sd.check_input_settings(device=match.index, channels=channels, samplerate=sample_rate)
+            match = resolve_input_device(
+                device_index=device_index,
+                device_name=device_name,
+                channels=physical_needed,
+                hostapi_name=hostapi_name,
+            )
+            sd.check_input_settings(device=match.index, channels=physical_needed, samplerate=sample_rate)
         except Exception as exc:
             raise SystemExit(f"AUDIO DEVICE ERROR: {exc}\nRun: .venv\\Scripts\\python.exe -m speakerptz.main --list-devices")
-        source = RealAudioSource(match.index, channels, sample_rate)
+        source = RealAudioSource(match.index, channels, sample_rate, channel_map=channel_map)
         source.start()
-        mode = f"REAL AUDIO | {channels} CH @ {sample_rate} Hz"
+        mode = f"REAL AUDIO | {channels} LOGICAL CH / {physical_needed} PHYSICAL CH @ {sample_rate} Hz"
         device_label = f"{match.index} | {match.name}"
         needs_stop = True
-        log_event(logger, "startup", version=VERSION, mode=mode, device_index=match.index, device_name=match.name, channels=channels)
+        log_event(
+            logger,
+            "startup",
+            version=VERSION,
+            mode=mode,
+            device_index=match.index,
+            device_name=match.name,
+            channels=channels,
+            channel_map=channel_map,
+        )
 
     running = True
-    last_auto = auto_enabled
     try:
         while running:
             key = controls.poll()
@@ -172,7 +221,26 @@ def main():
                     log_event(logger, "camera_request", source="manual", mic_channel=channel, camera=r.camera, preset=r.preset, label=r.name)
 
             levels = source.read_levels()
-            event = detector.update(levels)
+            audio_ok = True
+            audio_warning = ""
+            if needs_stop:
+                health = source.health(float(runtime_cfg.get("audio_stale_seconds", 1.5)))
+                if not health.ok:
+                    audio_ok = False
+                    audio_warning = f"PAUSED — no audio callback for {health.stale_seconds:.1f}s"
+                    if auto_enabled:
+                        auto_enabled = False
+                    if not stale_logged:
+                        log_event(logger, "audio_stale", seconds=round(health.stale_seconds, 3), status=health.callback_status)
+                        stale_logged = True
+                else:
+                    if stale_logged:
+                        log_event(logger, "audio_recovered")
+                    stale_logged = False
+                    if health.callback_status:
+                        audio_warning = health.callback_status
+
+            event = detector.update(levels) if audio_ok else None
             if auto_enabled and event:
                 kind, channel = event
                 if kind == "speaker" and channel in routes:
@@ -183,10 +251,7 @@ def main():
                     camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot")
                     log_event(logger, "silence_wide", camera=int(wide["camera"]), preset=int(wide["preset"]))
 
-            if auto_enabled != last_auto:
-                last_auto = auto_enabled
-
-            render(levels, detector, routes, mode, auto_enabled, camera, device_label)
+            render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning)
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass

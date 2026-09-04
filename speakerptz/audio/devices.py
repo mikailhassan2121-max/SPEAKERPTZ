@@ -9,28 +9,52 @@ class AudioDeviceMatch:
     name: str
     max_input_channels: int
     hostapi: int
+    hostapi_name: str = ""
+
+
+def _hostapi_names(sd_module) -> dict[int, str]:
+    try:
+        apis = sd_module.query_hostapis()
+    except Exception:
+        return {}
+    out = {}
+    for idx, api in enumerate(apis):
+        try:
+            out[idx] = str(api.get("name", f"Host API {idx}"))
+        except Exception:
+            out[idx] = f"Host API {idx}"
+    return out
 
 
 def list_input_devices(sd_module=None) -> list[AudioDeviceMatch]:
     if sd_module is None:
         import sounddevice as sd_module
     devices = sd_module.query_devices()
+    api_names = _hostapi_names(sd_module)
     out: list[AudioDeviceMatch] = []
     for idx, d in enumerate(devices):
         max_in = int(d.get("max_input_channels", 0))
         if max_in > 0:
+            hostapi = int(d.get("hostapi", -1))
             out.append(
                 AudioDeviceMatch(
                     index=idx,
                     name=str(d.get("name", f"Device {idx}")),
                     max_input_channels=max_in,
-                    hostapi=int(d.get("hostapi", -1)),
+                    hostapi=hostapi,
+                    hostapi_name=api_names.get(hostapi, ""),
                 )
             )
     return out
 
 
-def resolve_input_device(device_index=None, device_name: str | None = None, channels: int = 1, sd_module=None) -> AudioDeviceMatch:
+def resolve_input_device(
+    device_index=None,
+    device_name: str | None = None,
+    channels: int = 1,
+    hostapi_name: str | None = None,
+    sd_module=None,
+) -> AudioDeviceMatch:
     devices = list_input_devices(sd_module=sd_module)
 
     if device_index is not None:
@@ -44,15 +68,25 @@ def resolve_input_device(device_index=None, device_name: str | None = None, chan
         if not matches:
             names = ", ".join(f"{d.index}:{d.name}" for d in devices)
             raise ValueError(f"No input device matched '{device_name}'. Available inputs: {names}")
-        # Prefer a match that can actually satisfy the requested channel count.
+
         capable = [d for d in matches if d.max_input_channels >= int(channels)]
-        match = capable[0] if capable else matches[0]
+        pool = capable or matches
+        if hostapi_name:
+            api_needle = hostapi_name.strip().lower()
+            api_matches = [d for d in pool if api_needle in d.hostapi_name.lower()]
+            if api_matches:
+                pool = api_matches
+        # Prefer the most capable match if Windows exposes the same endpoint through
+        # several host APIs. Exact host API can still be pinned in local.yaml.
+        match = sorted(pool, key=lambda d: (-d.max_input_channels, d.index))[0]
     else:
-        raise ValueError("No audio input device configured. Set runtime.device_name or use --device/--device-name.")
+        raise ValueError(
+            "No audio input device configured. Set runtime.device_name or use --device/--device-name."
+        )
 
     if match.max_input_channels < int(channels):
         raise ValueError(
             f"Audio device '{match.name}' exposes {match.max_input_channels} input channel(s), "
-            f"but SPEAKERPTZ is configured for {channels}."
+            f"but SPEAKERPTZ needs {channels}."
         )
     return match
