@@ -15,7 +15,7 @@ from .core.detector import ActiveSpeakerDetector
 from .runtime.logging import setup_logging, event as log_event
 
 
-VERSION = "0.6"
+VERSION = "0.7"
 
 
 class ConsoleControls:
@@ -51,12 +51,16 @@ def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""
         bars = max(0, min(24, int((db + 70) / 2)))
         floor = snap.noise_floors[idx - 1] if idx - 1 < len(snap.noise_floors) else None
         snr = snap.snr_db[idx - 1] if idx - 1 < len(snap.snr_db) else None
+        speech = snap.speech_probabilities[idx - 1] if idx - 1 < len(snap.speech_probabilities) else None
         marker = "  < ACTIVE" if detector.active == idx else ""
         floor_text = f"floor {floor:6.1f}" if floor is not None else "floor   --.-"
         snr_text = f"+{snr:4.1f}" if snr is not None and snr >= 0 else (f"{snr:5.1f}" if snr is not None else "  --.-")
         print(
             f"MIC {idx:02d} <- IN {physical:02d} | {name[:18]:18} {db:6.1f} dB | "
-            f"{floor_text} | SNR {snr_text} | {'█' * bars}{marker}"
+            f"{floor_text} | SNR {snr_text} | VAD {speech * 100:5.1f}% | {'█' * bars}{marker}"
+            if speech is not None
+            else f"MIC {idx:02d} <- IN {physical:02d} | {name[:18]:18} {db:6.1f} dB | "
+            f"{floor_text} | SNR {snr_text} | VAD   --.-% | {'█' * bars}{marker}"
         )
 
     print()
@@ -69,6 +73,7 @@ def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""
         print("ACTIVE SPEAKER: NONE")
 
     print(f"CONFIDENCE: {detector.confidence * 100:5.1f}%")
+    print(f"DETECTOR: {snap.reason}")
     print(f"AUTO DIRECTOR: {'ON' if auto_enabled else 'OFF / MANUAL'}")
     print(f"MODE: {mode}")
     if device_label:
@@ -176,6 +181,20 @@ def build_detector(audio_cfg, now=None):
         silence_timeout_ms=int(audio_cfg.get("silence_timeout_ms", 5000)),
         calibration_seconds=float(audio_cfg.get("calibration_seconds", 3.0)),
         confidence_min=float(audio_cfg.get("confidence_min", 0.55)),
+        vad_enabled=bool(audio_cfg.get("vad_enabled", True)),
+        vad_threshold=float(audio_cfg.get("vad_threshold", 0.55)),
+        vad_weight=float(audio_cfg.get("vad_weight", 0.45)),
+        confidence_smoothing=float(audio_cfg.get("confidence_smoothing", 0.35)),
+        transient_rejection_ms=int(audio_cfg.get("transient_rejection_ms", 180)),
+        overlap_margin_db=float(audio_cfg.get("overlap_margin_db", 2.0)),
+        adaptive_noise_enabled=bool(audio_cfg.get("adaptive_noise_enabled", True)),
+        adaptive_noise_alpha=float(audio_cfg.get("adaptive_noise_alpha", 0.02)),
+        noise_floor_min_db=float(audio_cfg.get("noise_floor_min_db", -85.0)),
+        noise_floor_max_db=float(audio_cfg.get("noise_floor_max_db", -35.0)),
+        disabled_channels=audio_cfg.get("disabled_channels", []),
+        level_offsets_db=audio_cfg.get("level_offsets_db", []),
+        bleed_pairs=audio_cfg.get("bleed_pairs", []),
+        bleed_rejection_db=float(audio_cfg.get("bleed_rejection_db", 6.0)),
         now=now,
     )
 
@@ -345,7 +364,13 @@ def main():
                     result = camera.goto_preset(r.camera, r.preset, f"{r.name} (manual)")
                     log_event(logger, "camera_request", source="manual", mic_channel=channel, camera=r.camera, preset=r.preset, label=r.name, accepted=result.accepted, reason=result.reason)
 
-            levels = source.read_levels()
+            if hasattr(source, "read_observation"):
+                observation = source.read_observation()
+                levels = observation.levels_db
+                speech_probabilities = observation.speech_probabilities
+            else:
+                levels = source.read_levels()
+                speech_probabilities = None
             audio_ok = True
             audio_warning = ""
             if needs_stop:
@@ -366,16 +391,20 @@ def main():
                     if health.callback_status:
                         audio_warning = health.callback_status
 
-            event = detector.update(levels) if audio_ok else None
+            event = (
+                detector.update(levels, speech_probabilities=speech_probabilities)
+                if audio_ok
+                else None
+            )
             if auto_enabled and event:
                 kind, channel = event
                 if kind == "speaker" and channel in routes:
                     r = routes[channel]
                     result = camera.goto_preset(r.camera, r.preset, r.name)
-                    log_event(logger, "speaker_change", mic_channel=channel, name=r.name, confidence=round(detector.confidence, 4), camera=r.camera, preset=r.preset, accepted=result.accepted, reason=result.reason)
+                    log_event(logger, "speaker_change", mic_channel=channel, name=r.name, confidence=round(detector.confidence, 4), detector_reason=detector.reason, camera=r.camera, preset=r.preset, accepted=result.accepted, reason=result.reason)
                 elif kind == "silence":
                     result = camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot")
-                    log_event(logger, "silence_wide", camera=int(wide["camera"]), preset=int(wide["preset"]), accepted=result.accepted, reason=result.reason)
+                    log_event(logger, "silence_wide", detector_reason=detector.reason, camera=int(wide["camera"]), preset=int(wide["preset"]), accepted=result.accepted, reason=result.reason)
 
             render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning)
             time.sleep(0.1)

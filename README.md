@@ -2,9 +2,46 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
-## v0.6 — fail-safe camera-control framework
+## v0.7 — local speech-detection hardening
 
-v0.6 adds a protocol-neutral multi-camera manager, documented VISCA-over-IP and standard ONVIF preset drivers, bounded connectivity checks, manual camera testing, command pacing, retries, health reporting, and a latched emergency stop.
+v0.7 keeps the v0.6 camera safety framework intact and strengthens the active-speaker engine for isolated boardroom microphones. It adds local speech/non-speech analysis, confidence smoothing, transient rejection, overlap handling, adaptive noise floors, channel normalization, configurable bleed relationships, disabled-channel support, and operator-facing diagnostic reasons.
+
+### Speech detection model
+
+- Raw audio is analyzed only in memory. It is never queued outside the audio callback, recorded, transcribed, or sent to a cloud service.
+- VAD combines energy, zero-crossing rate, speech-band energy, and spectral shape. It does not identify who a voice belongs to; routing still comes only from the configured isolated mic channel.
+- A channel must pass both its normalized signal-above-noise gate and the VAD confidence gate.
+- Brief impacts and cough-like bursts must survive `transient_rejection_ms` before an initial camera selection.
+- Similar simultaneous candidates are treated as ambiguous overlap. The current speaker is held when possible; otherwise no camera move is requested.
+- `bleed_pairs` describes known neighboring microphones. If one is clearly stronger, the weaker paired channel is rejected as bleed.
+- Adaptive floors follow slow room/HVAC changes only while a channel is not classified as speech.
+- Diagnostic reason strings explain why the detector selected, held, rejected, or delayed a channel.
+
+Recommended starting settings are committed in `config/room.yaml` and `config/local.example.yaml`:
+
+```yaml
+audio:
+  vad_enabled: true
+  vad_threshold: 0.55
+  vad_weight: 0.45
+  confidence_smoothing: 0.35
+  transient_rejection_ms: 180
+  overlap_margin_db: 2.0
+  adaptive_noise_enabled: true
+  adaptive_noise_alpha: 0.02
+  noise_floor_min_db: -85.0
+  noise_floor_max_db: -35.0
+  disabled_channels: []
+  level_offsets_db: [0.0, 0.0, 0.0, 0.0]
+  bleed_pairs: []
+  bleed_rejection_db: 6.0
+```
+
+Keep `bleed_pairs` empty until the actual room layout is observed. The pair numbers refer to logical SPEAKERPTZ mics after `channel_map`, not physical Dante input numbers.
+
+## v0.6 camera framework retained
+
+The protocol-neutral multi-camera manager, VISCA-over-IP and ONVIF drivers, bounded connectivity checks, manual tester, rate limiting, retries, health reporting, and latched emergency stop remain unchanged.
 
 ### Safety boundary
 
@@ -17,7 +54,7 @@ v0.6 adds a protocol-neutral multi-camera manager, documented VISCA-over-IP and 
 - A stale audio callback disables AUTO and latches camera STOP.
 - Camera credentials are read only from the named environment variable. Plaintext `password` fields are rejected.
 
-This release is camera-framework complete but **not field-validated** against the school's unknown PTZ model. Confirm its exact protocol and preset numbering before enabling real control.
+The camera framework is complete but **not field-validated** against the school's unknown PTZ model. Confirm its exact protocol and preset numbering before enabling real control.
 
 ## Camera configuration
 
