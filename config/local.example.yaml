@@ -1,5 +1,10 @@
 # Copy this file to config/local.yaml on the SCHOOL COMPUTER.
 # config/local.yaml is intentionally ignored by Git.
+#
+# setup_school_windows.bat does this copy automatically on first run. After
+# that, field_setup.bat (see FIELD_SETUP.md) is the guided way to fill in the
+# seat mapping, calibration, and camera sections below -- it validates every
+# value before saving and keeps a timestamped backup of what it replaces.
 
 runtime:
   mode: real

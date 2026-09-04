@@ -2,6 +2,51 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
+## v0.10 — school field-validation toolkit
+
+v0.10 adds the guided tooling for a first real school installation and
+calibration session, without changing any v0.5–v0.9 runtime behavior. See
+**[FIELD_SETUP.md](FIELD_SETUP.md)** for the full step-by-step guide; this is
+the short summary.
+
+```powershell
+.\field_setup.bat
+```
+
+`field_setup.bat` is the single guided entry point covering: Dante/DVS
+verification, per-channel identification and seat mapping, guided noise-floor
+calibration, camera model/IP entry, bounded single-camera connectivity
+checks, preset/wide-shot mapping and validation, an automated rehearsal
+scenario suite, and a final field-readiness report. The individual pieces
+also work standalone:
+
+```powershell
+.\calibrate_room.bat       # guided per-mic noise-floor / speech-level calibration
+.\rehearsal_check.bat      # automated detector/camera rehearsal scenarios, no hardware needed
+.\field_readiness.bat      # prints the current readiness report and exits
+```
+
+Safety and privacy properties:
+
+- Real PTZ control is never enabled by any v0.10 tool; `real_control_enabled`
+  remains the only gate, and stays `false` by default.
+- Calibration stores only derived per-channel numbers (noise floor, speech
+  level, SNR) — never raw audio.
+- Camera discovery is never a network scan; every connectivity check targets
+  exactly one already-configured camera IP.
+- A human-only item (the physical joystick, manual override, and the real-PTZ
+  rehearsal itself) can never appear as an automated `PASS` in the readiness
+  report — only as `HUMAN CONFIRMATION REQUIRED` or `HUMAN CONFIRMED`, and
+  only after an operator explicitly records that confirmation.
+- Every config write from the guided workflow keeps a timestamped backup
+  (`config\local.yaml.bak-YYYYMMDD-HHMMSS`) next to the file it replaces.
+- The local field-setup journal (`logs\field-setup.json`) is Git-ignored,
+  same as the rest of `logs\`.
+
+SPEAKERPTZ remains **not field validated**: the school's exact Dante routing
+and PTZ camera model have not yet been physically confirmed. `field_readiness.bat`
+reports exactly how far the current install has gotten.
+
 ## v0.8 — local operator dashboard
 
 v0.8 adds a dependency-free operator dashboard at `http://127.0.0.1:8765` while leaving camera authority in the existing main control loop.
