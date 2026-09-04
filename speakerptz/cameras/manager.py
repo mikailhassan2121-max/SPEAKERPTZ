@@ -77,6 +77,7 @@ class CameraManager:
         self._lock = threading.RLock()
         self.emergency_stopped = False
         self.last_action = "No camera request yet"
+        self._current_presets: dict[int, int] = {}
 
         for cfg in configs:
             if cfg.enabled:
@@ -98,6 +99,11 @@ class CameraManager:
     @property
     def mode_banner(self) -> str:
         return "REAL PTZ CONTROL ENABLED" if self.real_control_enabled else "SIMULATION / DRY RUN"
+
+    @property
+    def current_presets(self) -> dict[int, int]:
+        with self._lock:
+            return dict(self._current_presets)
 
     def _make_driver(self, cfg: CameraConfig) -> CameraDriver:
         # A real driver is never even constructed until the global opt-in is true.
@@ -228,6 +234,7 @@ class CameraManager:
             if result.accepted:
                 self._last_global_command_at = now
                 self._last_command_at[camera_id] = now
+                self._current_presets[camera_id] = preset
                 self.last_action = f"Camera {camera_id} -> Preset {preset}" + (f" ({label})" if label else "")
             else:
                 self.last_action = f"Camera {camera_id} command failed: {result.reason}"

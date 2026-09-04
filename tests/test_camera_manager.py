@@ -65,6 +65,7 @@ def test_multiple_camera_routing():
     assert manager.goto_preset(2, 7, "Seat 7").accepted
     assert drivers[1].moves == []
     assert drivers[2].moves == [(7, "Seat 7")]
+    assert manager.current_presets == {2: 7}
 
 
 def test_disconnected_camera_fails_safe_without_move():

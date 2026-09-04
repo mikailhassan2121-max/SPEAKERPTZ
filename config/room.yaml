@@ -11,6 +11,13 @@ runtime:
 # real PTZ transmission after configuring and testing a known camera.
 real_control_enabled: false
 
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 8765
+  # A non-loopback bind is rejected unless this is deliberately changed.
+  allow_remote: false
+
 camera_control:
   command_interval_seconds: 0.10
   movement_cooldown_seconds: 0.75

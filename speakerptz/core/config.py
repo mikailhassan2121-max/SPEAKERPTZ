@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ipaddress
 import re
 import yaml
 from .models import PersonRoute
@@ -111,6 +112,32 @@ def _validate_audio_detection(audio: dict, channels: int) -> None:
         normalized_pairs.add(normalized)
 
 
+def _validate_dashboard(data: dict) -> None:
+    dashboard = data.get("dashboard", {})
+    if not isinstance(dashboard, dict):
+        raise ConfigError("dashboard must be a mapping.")
+    for key in ("enabled", "allow_remote"):
+        if key in dashboard and not isinstance(dashboard[key], bool):
+            raise ConfigError(f"dashboard.{key} must be true or false.")
+
+    host = str(dashboard.get("host", "127.0.0.1")).strip()
+    if not host:
+        raise ConfigError("dashboard.host must not be empty.")
+    loopback = host.lower() == "localhost"
+    try:
+        loopback = loopback or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        pass
+    if not loopback and dashboard.get("allow_remote", False) is not True:
+        raise ConfigError(
+            "dashboard.host is not loopback; set dashboard.allow_remote: true only after an explicit network-access decision."
+        )
+
+    port = _require_int(dashboard, "port", 1) if "port" in dashboard else 8765
+    if port > 65535:
+        raise ConfigError("dashboard.port must be between 1 and 65535.")
+
+
 def _validate_cameras(data: dict) -> dict[int, dict]:
     if "real_control_enabled" in data and not isinstance(data["real_control_enabled"], bool):
         raise ConfigError("real_control_enabled must be true or false.")
@@ -184,6 +211,7 @@ def validate_config(data: dict) -> None:
     if "wide_shot" not in data or not isinstance(data["wide_shot"], dict):
         raise ConfigError("Missing wide_shot section.")
 
+    _validate_dashboard(data)
     cameras = _validate_cameras(data)
 
     channels = _require_int(data["audio"], "channels", 1)
