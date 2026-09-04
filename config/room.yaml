@@ -1,0 +1,58 @@
+audio:
+  sample_rate: 48000
+  channels: 8
+
+  # v0.3 automatically learns each mic's quiet-room noise floor at startup.
+  calibration_seconds: 3.0
+
+  # A channel must satisfy BOTH absolute level and rise-above-own-floor gates.
+  absolute_threshold_db: -50.0
+  signal_margin_db: 8.0
+
+  # A challenger should beat the current mic by this much before handoff.
+  dominance_margin_db: 3.0
+
+  # Fast first shot, slower handoffs so tiny interjections do not whip the camera.
+  initial_activation_ms: 250
+  switch_delay_ms: 650
+  hold_time_ms: 1200
+  silence_timeout_ms: 5000
+  confidence_min: 0.55
+
+people:
+  - mic_channel: 1
+    name: Board Member 1
+    camera: 1
+    preset: 1
+  - mic_channel: 2
+    name: Board Member 2
+    camera: 1
+    preset: 2
+  - mic_channel: 3
+    name: Board Member 3
+    camera: 1
+    preset: 3
+  - mic_channel: 4
+    name: Board Member 4
+    camera: 1
+    preset: 4
+  - mic_channel: 5
+    name: Board Member 5
+    camera: 1
+    preset: 5
+  - mic_channel: 6
+    name: Superintendent
+    camera: 1
+    preset: 6
+  - mic_channel: 7
+    name: Podium
+    camera: 2
+    preset: 1
+  - mic_channel: 8
+    name: Spare
+    camera: 1
+    preset: 8
+
+wide_shot:
+  camera: 1
+  preset: 20
