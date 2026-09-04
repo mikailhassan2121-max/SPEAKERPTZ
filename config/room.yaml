@@ -7,11 +7,32 @@ runtime:
   log_dir: logs
   audio_stale_seconds: 1.5
 
+# This global safety gate remains false unless an operator intentionally enables
+# real PTZ transmission after configuring and testing a known camera.
+real_control_enabled: false
+
+camera_control:
+  command_interval_seconds: 0.10
+  movement_cooldown_seconds: 0.75
+  retry_count: 1
+  retry_backoff_seconds: 0.10
+
+cameras:
+  - id: 1
+    name: Camera 1
+    driver: simulator
+    host: null
+    port: null
+    username: null
+    password_env: null
+    profile_token: null
+    timeout_seconds: 1.0
+    enabled: true
 audio:
   sample_rate: 48000
-  channels: 8
-  channel_map: [1, 2, 3, 4, 5, 6, 7, 8]
-  identifier_channels: 8
+  channels: 4
+  channel_map: [1, 2, 3, 4]
+  identifier_channels: 4
   calibration_seconds: 3.0
   absolute_threshold_db: -50.0
   signal_margin_db: 8.0
@@ -23,14 +44,10 @@ audio:
   confidence_min: 0.55
 
 people:
-  - {mic_channel: 1, name: Board Member 1, camera: 1, preset: 1}
-  - {mic_channel: 2, name: Board Member 2, camera: 1, preset: 2}
-  - {mic_channel: 3, name: Board Member 3, camera: 1, preset: 3}
-  - {mic_channel: 4, name: Board Member 4, camera: 1, preset: 4}
-  - {mic_channel: 5, name: Board Member 5, camera: 1, preset: 5}
-  - {mic_channel: 6, name: Superintendent, camera: 1, preset: 6}
-  - {mic_channel: 7, name: Podium, camera: 2, preset: 1}
-  - {mic_channel: 8, name: Spare, camera: 1, preset: 8}
+  - {mic_channel: 1, name: Seat 1, camera: 1, preset: 1}
+  - {mic_channel: 2, name: Seat 2, camera: 1, preset: 2}
+  - {mic_channel: 3, name: Seat 3, camera: 1, preset: 3}
+  - {mic_channel: 4, name: Seat 4, camera: 1, preset: 4}
 
 wide_shot:
   camera: 1

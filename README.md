@@ -2,21 +2,60 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
-## v0.5 — Dante Virtual Soundcard preparation
+## v0.6 — fail-safe camera-control framework
 
-v0.5 keeps camera control **simulation-only** and strengthens the audio/deployment side for the dedicated school production PC.
+v0.6 adds a protocol-neutral multi-camera manager, documented VISCA-over-IP and standard ONVIF preset drivers, bounded connectivity checks, manual camera testing, command pacing, retries, health reporting, and a latched emergency stop.
 
-### Added in v0.5
+### Safety boundary
 
-- physical Dante/DVS input -> logical SPEAKERPTZ mic mapping with `audio.channel_map`
-- support for sparse maps such as `MIC 1 <- DVS 5`, `MIC 2 <- DVS 6`, `MIC 3 <- DVS 9`
-- `identify_dante_channels.bat` live physical-input meter for finding which DVS channel belongs to each board microphone
-- optional Windows host-API preference when several endpoints share the same device name
-- improved startup doctor showing logical/physical channel requirements and host APIs
-- live audio callback watchdog; auto-director disables itself if the audio stream goes stale
-- audio recovery/stale events written to the normal local event log
-- no raw audio recording
-- real PTZ transmission is still disabled in this release
+- `real_control_enabled: false` is the committed default.
+- When that gate is false, even a configured VISCA or ONVIF entry is replaced at runtime by a simulator; its network driver is not constructed.
+- When the gate is true, AUTO still starts off on every launch and must be armed manually with `A`.
+- `camera_probe.bat` checks only Camera 1's configured IP. It does not scan a subnet.
+- `camera_test.bat` requires both the real-control opt-in and an exact typed confirmation before movement.
+- `X` disables AUTO and latches emergency STOP. `R` clears the latch but leaves AUTO off.
+- A stale audio callback disables AUTO and latches camera STOP.
+- Camera credentials are read only from the named environment variable. Plaintext `password` fields are rejected.
+
+This release is camera-framework complete but **not field-validated** against the school's unknown PTZ model. Confirm its exact protocol and preset numbering before enabling real control.
+
+## Camera configuration
+
+The committed example remains safe:
+
+```yaml
+real_control_enabled: false
+
+camera_control:
+  command_interval_seconds: 0.10
+  movement_cooldown_seconds: 0.75
+  retry_count: 1
+  retry_backoff_seconds: 0.10
+
+cameras:
+  - id: 1
+    name: Camera 1
+    driver: simulator       # visca or onvif only after model confirmation
+    host: null
+    port: null              # VISCA default 52381; ONVIF default 80
+    username: null
+    password_env: null
+    profile_token: null
+    timeout_seconds: 1.0
+    enabled: true
+```
+
+For ONVIF, put only an environment-variable name in YAML, such as `password_env: SPEAKERPTZ_CAMERA_1_PASSWORD`, then set its value locally in Windows. Never commit the value.
+
+After configuring the exact camera while no meeting is in progress:
+
+```powershell
+doctor_school.bat
+camera_probe.bat
+camera_test.bat
+```
+
+`camera_probe.bat` performs a read-only camera check. The manual tester supports `P <preset>`, `W`, `H`, `S`, and `Q` after confirmation.
 
 ## Important Dante model
 
