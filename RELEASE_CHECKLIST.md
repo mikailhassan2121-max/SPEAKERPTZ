@@ -16,8 +16,12 @@ All of these are re-checkable at any time with no school hardware:
 - [ ] `run_soak_test.bat` passes (`passed: true`, `invariant_failures: 0`).
 - [ ] `real_control_enabled` is `false` in every committed config
       (`config/room.yaml`, `config/local.example.yaml`).
-- [ ] AUTO starts OFF on every launch, in every mode, regardless of the
-      previous session's persisted state.
+- [ ] In real-camera mode (`real_control_enabled: true`), AUTO starts OFF on
+      every launch, regardless of the previous session's persisted state.
+      (In simulator mode, or with `real_control_enabled: false`, AUTO may
+      start ON per `runtime.auto_start` — there is no real camera to move,
+      so this is not a safety gate; see `speakerptz/main.py`'s
+      `auto_enabled` computation.)
 - [ ] Emergency stop (`X`) latches a STOP on every camera and disables AUTO;
       reset (`R`) clears the latch but leaves AUTO off.
 - [ ] No secrets, camera passwords, or committed `config/local.yaml` in the
@@ -31,10 +35,14 @@ All of these are re-checkable at any time with no school hardware:
 - [ ] Documentation (`README.md`, `FIELD_SETUP.md`, `RUNTIME_RESILIENCE.md`)
       accurately describes current commands and behavior; every command it
       references actually exists.
-- [ ] `field_setup.bat` and its component tools (`identify_dante_channels.bat`,
-      `calibrate_room.bat`, `camera_probe.bat`, `camera_test.bat`,
-      `rehearsal_check.bat`, `field_readiness.bat`) run without hardware in
-      simulator/dry-run form.
+- [ ] `field_setup.bat`'s guided walkthrough, `rehearsal_check.bat`, and
+      `field_readiness.bat` all run with no hardware and no `runtime.mode:
+      real` / `real_control_enabled: true` required.
+- [ ] `identify_dante_channels.bat`, `calibrate_room.bat`, `camera_probe.bat`,
+      and `camera_test.bat` each fail with a clear, non-crashing error
+      message (not a traceback) when run against the default simulator
+      config, since each of these requires real audio (`runtime.mode: real`)
+      or real camera control (`real_control_enabled: true`) by design.
 - [ ] Version strings across the running program (`speakerptz.main.VERSION`,
       `speakerptz.__version__`, dashboard banner, setup/field-setup console
       banners) agree with the release being cut.

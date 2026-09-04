@@ -26,7 +26,8 @@ Read the docs in this order:
 
 ### Normal meeting routine
 
-Once [FIELD_SETUP.md](FIELD_SETUP.md) has been completed for this room:
+Once [FIELD_SETUP.md](FIELD_SETUP.md) has been completed for this room and
+`real_control_enabled: true` has been deliberately set:
 
 1. Start the production PC.
 2. Start/verify Dante Virtual Soundcard is running and subscribed.
