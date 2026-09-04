@@ -2,9 +2,31 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
-## v0.7 — local speech-detection hardening
+## v0.8 — local operator dashboard
 
-v0.7 keeps the v0.6 camera safety framework intact and strengthens the active-speaker engine for isolated boardroom microphones. It adds local speech/non-speech analysis, confidence smoothing, transient rejection, overlap handling, adaptive noise floors, channel normalization, configurable bleed relationships, disabled-channel support, and operator-facing diagnostic reasons.
+v0.8 adds a dependency-free operator dashboard at `http://127.0.0.1:8765` while leaving camera authority in the existing main control loop.
+
+```powershell
+run_operator_dashboard.bat
+```
+
+The dashboard shows AUTO state, active and candidate speakers, confidence, detector reasons, mic/VAD meters, noise floors, audio and Dante/DVS status, camera health, current preset, recent events, uptime, and warnings. It provides AUTO, WIDE, emergency stop/reset, and manual camera/preset controls.
+
+Safety properties:
+
+- The HTTP thread can only queue allowlisted commands. Camera drivers are called only by the main loop.
+- The page displays either `SIMULATION / DRY RUN` or a pulsing red `REAL PTZ CONTROL ENABLED` banner.
+- Real-mode movement controls require an additional browser confirmation.
+- State may be viewed without a token, but every command requires a random per-launch control token embedded only in the same-origin page.
+- No permissive CORS headers are emitted.
+- The committed host is `127.0.0.1`. A non-loopback host fails configuration validation unless `allow_remote: true` is explicitly set.
+- `--no-dashboard` disables the server for console-only operation. `--dashboard-port` can resolve a local port conflict without editing the config.
+
+The dashboard is an operator surface, not a replacement for console hotkeys, event logs, startup checks, emergency-stop logic, or audio/camera fail-safes.
+
+## v0.7 speech detection retained
+
+The v0.7 engine adds local speech/non-speech analysis, confidence smoothing, transient rejection, overlap handling, adaptive noise floors, channel normalization, configurable bleed relationships, disabled-channel support, and operator-facing diagnostic reasons.
 
 ### Speech detection model
 

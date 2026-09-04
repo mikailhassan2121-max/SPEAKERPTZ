@@ -13,9 +13,10 @@ from .cameras.base import CameraConnectionError
 from .core.config import load_config, ConfigError
 from .core.detector import ActiveSpeakerDetector
 from .runtime.logging import setup_logging, event as log_event
+from .ui.dashboard import DashboardCommand, DashboardServer, DashboardState
 
 
-VERSION = "0.7"
+VERSION = "0.8"
 
 
 class ConsoleControls:
@@ -33,7 +34,18 @@ class ConsoleControls:
             return None
 
 
-def render(levels, detector, routes, mode, auto_enabled, camera, device_label="", channel_map=None, audio_warning=""):
+def render(
+    levels,
+    detector,
+    routes,
+    mode,
+    auto_enabled,
+    camera,
+    device_label="",
+    channel_map=None,
+    audio_warning="",
+    dashboard_url="",
+):
     os.system("cls" if os.name == "nt" else "clear")
     snap = detector.snapshot()
     print(f"SPEAKERPTZ v{VERSION}")
@@ -87,6 +99,8 @@ def render(levels, detector, routes, mode, auto_enabled, camera, device_label=""
         detail = f" | {health.message}" if health.message else ""
         print(f"CAM {camera_id}: {health.state.value.upper()}{detail}")
     print(f"LAST CAMERA REQUEST: {camera.last_action}")
+    if dashboard_url:
+        print(f"OPERATOR DASHBOARD: {dashboard_url}")
     print("LOGGING: ON -> logs\\speakerptz-YYYYMMDD.log")
     print()
     print("HOTKEYS: A = auto on/off | X = EMERGENCY STOP | R = reset stop | W = wide | 1-9 = manual | Q = quit")
@@ -212,6 +226,8 @@ def main():
     parser.add_argument("--identify-count", type=int, help="Physical input count to open in identifier mode")
     parser.add_argument("--camera-probe", type=int, metavar="ID", help="Safely probe one configured camera endpoint and exit")
     parser.add_argument("--camera-test", type=int, metavar="ID", help="Explicit interactive manual test for one real camera")
+    parser.add_argument("--no-dashboard", action="store_true", help="Disable the configured localhost dashboard")
+    parser.add_argument("--dashboard-port", type=int, help="Override the configured localhost dashboard port")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -278,6 +294,9 @@ def main():
     device_label = ""
     audio_warning = ""
     stale_logged = False
+    dashboard_state: DashboardState | None = None
+    dashboard_server: DashboardServer | None = None
+    dashboard_url = ""
 
     if requested_sim:
         source = SimulatedAudioSource(channels)
@@ -330,8 +349,77 @@ def main():
         camera_states={camera_id: health.state.value for camera_id, health in camera_health.items()},
     )
 
+    def dashboard_command(command: DashboardCommand) -> None:
+        nonlocal auto_enabled
+        action = command.action
+        accepted = True
+        message = ""
+        if action in {"auto_toggle", "auto_on"}:
+            requested_on = not auto_enabled if action == "auto_toggle" else True
+            healthy = all(h.ok for h in camera.health_all().values() if h.state != CameraState.DISABLED)
+            if requested_on and (camera.emergency_stopped or not healthy):
+                auto_enabled = False
+                accepted = False
+                message = "AUTO blocked by emergency stop or camera health."
+            else:
+                auto_enabled = requested_on
+                message = f"AUTO {'enabled' if auto_enabled else 'disabled'}"
+            log_event(logger, "auto_director", enabled=auto_enabled, source="dashboard", accepted=accepted)
+        elif action == "auto_off":
+            auto_enabled = False
+            message = "AUTO disabled"
+            log_event(logger, "auto_director", enabled=False, source="dashboard", accepted=True)
+        elif action == "emergency_stop":
+            auto_enabled = False
+            camera.emergency_stop()
+            message = "Emergency stop latched"
+            log_event(logger, "operator_emergency_stop", source="dashboard")
+        elif action == "reset_stop":
+            auto_enabled = False
+            camera.clear_emergency_stop()
+            message = "Emergency stop cleared; AUTO remains off"
+            log_event(logger, "operator_emergency_stop_reset", source="dashboard")
+        elif action == "wide":
+            result = camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot (dashboard)")
+            accepted = result.accepted
+            message = "Wide shot requested" if accepted else result.reason
+            log_event(logger, "camera_request", source="dashboard", camera=int(wide["camera"]), preset=int(wide["preset"]), label="Wide shot", accepted=accepted, reason=result.reason)
+        elif action == "manual_preset":
+            auto_enabled = False
+            result = camera.goto_preset(int(command.camera_id), int(command.preset), "Dashboard manual")
+            accepted = result.accepted
+            message = "Manual preset requested" if accepted else result.reason
+            log_event(logger, "camera_request", source="dashboard", camera=command.camera_id, preset=command.preset, label="Manual preset", accepted=accepted, reason=result.reason)
+        if dashboard_state is not None:
+            dashboard_state.add_event(
+                "operator_command",
+                f"{action}: {message}",
+                accepted=accepted,
+            )
+
     running = True
     try:
+        dashboard_cfg = cfg.get("dashboard", {})
+        if bool(dashboard_cfg.get("enabled", False)) and not args.no_dashboard:
+            dashboard_state = DashboardState()
+            dashboard_state.update(
+                version=VERSION,
+                mode_banner=camera.mode_banner,
+                real_control_enabled=camera.real_control_enabled,
+                auto_enabled=auto_enabled,
+                emergency_stopped=camera.emergency_stopped,
+            )
+            dashboard_server = DashboardServer(
+                dashboard_state,
+                str(dashboard_cfg.get("host", "127.0.0.1")),
+                int(args.dashboard_port or dashboard_cfg.get("port", 8765)),
+            )
+            try:
+                dashboard_url = dashboard_server.start()
+            except OSError as exc:
+                raise SystemExit(f"DASHBOARD STARTUP ERROR: {exc}") from exc
+            dashboard_state.add_event("startup", f"Dashboard listening at {dashboard_url}")
+            log_event(logger, "dashboard_started", url=dashboard_url)
         while running:
             key = controls.poll()
             if key == "q":
@@ -364,6 +452,10 @@ def main():
                     result = camera.goto_preset(r.camera, r.preset, f"{r.name} (manual)")
                     log_event(logger, "camera_request", source="manual", mic_channel=channel, camera=r.camera, preset=r.preset, label=r.name, accepted=result.accepted, reason=result.reason)
 
+            if dashboard_state is not None:
+                for command in dashboard_state.drain_commands():
+                    dashboard_command(command)
+
             if hasattr(source, "read_observation"):
                 observation = source.read_observation()
                 levels = observation.levels_db
@@ -383,10 +475,14 @@ def main():
                     if not stale_logged:
                         camera.emergency_stop()
                         log_event(logger, "audio_stale", seconds=round(health.stale_seconds, 3), status=health.callback_status)
+                        if dashboard_state is not None:
+                            dashboard_state.add_event("audio_stale", audio_warning)
                         stale_logged = True
                 else:
                     if stale_logged:
                         log_event(logger, "audio_recovered")
+                        if dashboard_state is not None:
+                            dashboard_state.add_event("audio_recovered", "Audio callback recovered; AUTO remains off")
                     stale_logged = False
                     if health.callback_status:
                         audio_warning = health.callback_status
@@ -402,11 +498,96 @@ def main():
                     r = routes[channel]
                     result = camera.goto_preset(r.camera, r.preset, r.name)
                     log_event(logger, "speaker_change", mic_channel=channel, name=r.name, confidence=round(detector.confidence, 4), detector_reason=detector.reason, camera=r.camera, preset=r.preset, accepted=result.accepted, reason=result.reason)
+                    if dashboard_state is not None:
+                        dashboard_state.add_event("speaker_change", f"{r.name} -> camera {r.camera} preset {r.preset}", accepted=result.accepted)
                 elif kind == "silence":
                     result = camera.goto_preset(int(wide["camera"]), int(wide["preset"]), "Wide shot")
                     log_event(logger, "silence_wide", detector_reason=detector.reason, camera=int(wide["camera"]), preset=int(wide["preset"]), accepted=result.accepted, reason=result.reason)
+                    if dashboard_state is not None:
+                        dashboard_state.add_event("silence_wide", "Silence timeout -> wide shot", accepted=result.accepted)
 
-            render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning)
+            if dashboard_state is not None:
+                snapshot = detector.snapshot()
+                health_rows = camera.health_all()
+                warnings = []
+                if camera.real_control_enabled:
+                    warnings.append("REAL PTZ CONTROL ENABLED")
+                if camera.emergency_stopped:
+                    warnings.append("EMERGENCY STOP IS LATCHED")
+                if audio_warning:
+                    warnings.append(audio_warning)
+                for camera_id, camera_health in health_rows.items():
+                    if camera_health.state not in {CameraState.READY, CameraState.DISABLED}:
+                        warnings.append(f"Camera {camera_id}: {camera_health.state.value}")
+
+                meters = []
+                for index, level in enumerate(levels):
+                    channel = index + 1
+                    route = routes.get(channel)
+                    meters.append(
+                        {
+                            "channel": channel,
+                            "physical_input": channel_map[index] if index < len(channel_map) else channel,
+                            "name": route.name if route else f"Mic {channel}",
+                            "level_db": round(float(level), 2),
+                            "noise_floor_db": round(snapshot.noise_floors[index], 2) if index < len(snapshot.noise_floors) else None,
+                            "snr_db": round(snapshot.snr_db[index], 2) if index < len(snapshot.snr_db) else None,
+                            "speech_probability": round(snapshot.speech_probabilities[index], 4) if index < len(snapshot.speech_probabilities) else 0.0,
+                            "eligible": bool(snapshot.eligible[index]) if index < len(snapshot.eligible) else False,
+                        }
+                    )
+
+                active_route = routes.get(snapshot.active) if snapshot.active else None
+                candidate_route = routes.get(snapshot.candidate) if snapshot.candidate else None
+                if requested_sim:
+                    dante_status = "SIMULATED / NOT CONNECTED"
+                elif "dante" in device_label.lower() and audio_ok:
+                    dante_status = "CONNECTED"
+                elif audio_ok:
+                    dante_status = "AUDIO ACTIVE; DANTE NAME NOT CONFIRMED"
+                else:
+                    dante_status = "NOT READY"
+
+                dashboard_state.update(
+                    version=VERSION,
+                    mode_banner=camera.mode_banner,
+                    real_control_enabled=camera.real_control_enabled,
+                    auto_enabled=auto_enabled,
+                    emergency_stopped=camera.emergency_stopped,
+                    active_speaker=(
+                        {"channel": snapshot.active, "name": active_route.name}
+                        if snapshot.active and active_route
+                        else ({"channel": snapshot.active, "name": f"Mic {snapshot.active}"} if snapshot.active else None)
+                    ),
+                    candidate_speaker=(
+                        {"channel": snapshot.candidate, "name": candidate_route.name}
+                        if snapshot.candidate and candidate_route
+                        else ({"channel": snapshot.candidate, "name": f"Mic {snapshot.candidate}"} if snapshot.candidate else None)
+                    ),
+                    confidence=round(snapshot.confidence, 4),
+                    detector_reason=snapshot.reason,
+                    meters=meters,
+                    audio={
+                        "ok": audio_ok,
+                        "device": device_label or "Simulated multichannel audio",
+                        "warning": audio_warning,
+                        "dante_status": dante_status,
+                    },
+                    cameras=[
+                        {
+                            "id": camera_id,
+                            "name": camera.configs[camera_id].name,
+                            "state": camera_health.state.value.upper(),
+                            "message": camera_health.message or camera_health.last_error or "",
+                        }
+                        for camera_id, camera_health in health_rows.items()
+                    ],
+                    current_camera_presets=camera.current_presets,
+                    last_camera_request=camera.last_action,
+                    warnings=warnings,
+                )
+
+            render(levels, detector, routes, mode, auto_enabled, camera, device_label, channel_map, audio_warning, dashboard_url)
             time.sleep(0.1)
     except KeyboardInterrupt:
         pass
@@ -415,6 +596,10 @@ def main():
             source.stop()
         camera.emergency_stop()
         camera.disconnect_all()
+        if dashboard_state is not None:
+            dashboard_state.add_event("shutdown", "SPEAKERPTZ shutting down")
+        if dashboard_server is not None:
+            dashboard_server.stop()
         log_event(logger, "shutdown")
         print("\nStopped.")
 

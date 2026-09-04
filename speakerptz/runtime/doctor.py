@@ -46,6 +46,16 @@ def run_doctor(config_path: str) -> int:
         f"disabled channels={disabled or 'none'} | bleed pairs={bleed_pairs or 'none'}"
     )
     print("[PASS] Audio privacy: in-memory features only; raw audio recording is off")
+    dashboard = cfg.get("dashboard", {})
+    if dashboard.get("enabled", False):
+        host = str(dashboard.get("host", "127.0.0.1"))
+        port = int(dashboard.get("port", 8765))
+        display_host = f"[{host}]" if ":" in host else host
+        scope = "LOCALHOST ONLY" if host.lower() in {"127.0.0.1", "::1", "localhost"} else "REMOTE ACCESS EXPLICITLY ENABLED"
+        prefix = "PASS" if scope == "LOCALHOST ONLY" else "WARN"
+        print(f"[{prefix}] Operator dashboard: http://{display_host}:{port} | {scope}")
+    else:
+        print("[PASS] Operator dashboard: disabled by configuration")
 
     simulation_mode = runtime.get("mode", "real") == "simulate"
     print("\nWindows audio inputs visible to Python:")

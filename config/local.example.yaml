@@ -18,6 +18,14 @@ runtime:
 # is deliberately changed to true.
 real_control_enabled: false
 
+# Local operator dashboard. Keep the loopback address unless network exposure
+# has been explicitly reviewed. The server rejects non-loopback hosts by default.
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 8765
+  allow_remote: false
+
 camera_control:
   command_interval_seconds: 0.10
   movement_cooldown_seconds: 0.75
