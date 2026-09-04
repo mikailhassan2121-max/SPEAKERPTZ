@@ -21,7 +21,7 @@ from .runtime.state import RuntimeState
 from .ui.dashboard import DashboardCommand, DashboardServer, DashboardState
 
 
-VERSION = "0.9"
+VERSION = "0.10"
 
 
 class ConsoleControls:
@@ -236,6 +236,18 @@ def main():
     parser.add_argument("--soak-test", action="store_true", help="Run bounded synthetic resilience test and exit")
     parser.add_argument("--soak-iterations", type=int, default=5000, help="Synthetic frames for --soak-test")
     parser.add_argument("--soak-seed", type=int, default=17, help="Deterministic seed for --soak-test")
+    parser.add_argument("--field-setup", action="store_true", help="Run the guided school field-setup workflow")
+    parser.add_argument("--calibrate", action="store_true", help="Run guided per-mic room calibration and exit")
+    parser.add_argument("--field-readiness", action="store_true", help="Print the field readiness report and exit")
+    parser.add_argument("--rehearsal-check", action="store_true", help="Run automated rehearsal scenarios and exit")
+    parser.add_argument("--field-confirm", metavar="KEY", help="Record a human-verified confirmation and exit")
+    parser.add_argument("--field-note", default="", help="Optional note attached to --field-confirm")
+    parser.add_argument("--operator", default="", help="Operator name recorded with field-tool actions")
+    parser.add_argument(
+        "--field-record",
+        default="logs/field-setup.json",
+        help="Path to the local field-setup journal (Git-ignored)",
+    )
     args = parser.parse_args()
 
     if args.soak_test:
@@ -255,6 +267,43 @@ def main():
     if args.doctor:
         from .runtime.doctor import run_doctor
         raise SystemExit(run_doctor(args.config))
+
+    if args.rehearsal_check:
+        from .field.rehearsal import render_rehearsal, run_automated_scenarios
+        from .field.record import FieldRecord
+        from .field.models import StepStatus
+
+        results = run_automated_scenarios()
+        print(render_rehearsal(results))
+        record = FieldRecord(args.field_record)
+        if args.operator:
+            record.set_session(operator=args.operator)
+        failed = [result for result in results.values() if result.status is StepStatus.FAIL]
+        for result in results.values():
+            record.record_result(result)
+        record.record_step(
+            "dry_run_rehearsal",
+            StepStatus.FAIL if failed else StepStatus.PASS,
+            f"{len(failed)} failing scenario(s).",
+        )
+        raise SystemExit(0 if not failed else 1)
+
+    if args.field_confirm:
+        from .field.models import CONFIRMABLE_KEYS
+        from .field.record import FieldRecord
+
+        if args.field_confirm not in CONFIRMABLE_KEYS:
+            accepted = ", ".join(sorted(CONFIRMABLE_KEYS))
+            raise SystemExit(f"FIELD CONFIRM ERROR: unknown key '{args.field_confirm}'. Accepted values: {accepted}.")
+        if not args.operator:
+            raise SystemExit("FIELD CONFIRM ERROR: --operator is required for a human confirmation.")
+        record = FieldRecord(args.field_record)
+        try:
+            record.confirm(args.field_confirm, operator=args.operator, note=args.field_note)
+        except ValueError as exc:
+            raise SystemExit(f"FIELD CONFIRM ERROR: {exc}")
+        print(f"Recorded human confirmation for '{args.field_confirm}' by {args.operator}.")
+        return
 
     try:
         cfg, routes = load_config(args.config)
@@ -315,6 +364,56 @@ def main():
         from .audio.identifier import run_identifier
         try:
             run_identifier(match.index, count, sample_rate, f"{match.index} | {match.name}")
+            return
+        finally:
+            instance_lock.release()
+
+    if args.field_readiness:
+        from .field.readiness import build_readiness_report, render_readiness
+        from .field.record import FieldRecord
+
+        try:
+            report = build_readiness_report(args.config, field_record=FieldRecord(args.field_record))
+            print(render_readiness(report))
+            raise SystemExit(0 if report.ready_for_hardware_rehearsal else 1)
+        finally:
+            instance_lock.release()
+
+    if args.calibrate:
+        from .field.mapping import plan_from_config
+        from .field.models import StepStatus
+        from .field.record import FieldRecord
+        from .field.wizard import WizardIO, guided_calibration, real_source_factory
+
+        try:
+            if requested_sim:
+                raise SystemExit("CALIBRATION requires a real audio device; set runtime.mode: real or use --field-setup for a simulated rehearsal of this step.")
+            plan = plan_from_config(cfg)
+            if not plan.seats:
+                raise SystemExit("CALIBRATION requires people/seats to already be mapped in configuration.")
+            io = WizardIO()
+            calibration = guided_calibration(
+                cfg, plan.seats, io, source_factory=real_source_factory(cfg, len(plan.seats))
+            )
+            record = FieldRecord(args.field_record)
+            if args.operator:
+                record.set_session(operator=args.operator)
+            record.record_calibration(calibration.to_dict())
+            status = StepStatus.PASS if calibration.complete else StepStatus.WARN
+            record.record_step("mic_calibration", status, f"{len(calibration.warnings)} warning(s).")
+            raise SystemExit(0 if calibration.complete else 1)
+        finally:
+            instance_lock.release()
+
+    if args.field_setup:
+        from .field.record import FieldRecord
+        from .field.wizard import WizardIO, run_field_setup
+
+        try:
+            operator = args.operator or input("Operator name for this setup session> ").strip()
+            if not operator:
+                raise SystemExit("FIELD SETUP ERROR: an operator name is required.")
+            run_field_setup(args.config, operator=operator, io=WizardIO(), record=FieldRecord(args.field_record))
             return
         finally:
             instance_lock.release()
