@@ -2,74 +2,71 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
-## v0.3 status
+## v0.4 development branch
 
-v0.3 is still **camera-safe / simulation-only**, but the audio side is much closer to production:
+v0.4 focuses on making the proven v0.3 detector easy and safe to deploy on a dedicated school production PC.
 
-- simulated or real Windows multichannel audio
-- automatic per-channel quiet-room calibration at startup
-- selects by signal rise above each mic's own floor, not raw loudness alone
-- crosstalk-aware speaker handoff with a dominance margin
-- confidence score
-- short-interjection rejection via delayed handoff
-- active-speaker hold and silence-to-wide behavior
-- manual operator controls from the keyboard
-- mic -> person -> camera/preset mapping in YAML
-- real PTZ commands intentionally remain disabled
+### Added in v0.4
 
-## First run on Windows
+- per-computer `config/local.yaml` that is intentionally **not committed to Git**
+- audio-device selection by stable **device-name substring** as well as numeric index
+- `doctor_school.bat` startup self-test before a meeting
+- rotating local event logs under `logs/`
+- safer one-click school setup and dry-run launchers
+- validation for duplicate/out-of-range mic mappings
+- camera driver remains **simulator-only**; this branch cannot control a real PTZ yet
 
-From a normal Command Prompt or PowerShell in this folder:
+## Development quick start
 
 ```powershell
 setup_windows.bat
-```
-
-No PowerShell activation command is required; every launcher calls `.venv\\Scripts\\python.exe` directly.
-
-### Simulation
-
-```powershell
 run_simulation.bat
+run_tests.bat
 ```
 
-Stay quiet during the first 3 seconds while the detector calibrates.
+## School computer install
 
-### List Windows audio devices
+After cloning the repository on the dedicated production computer:
 
 ```powershell
-list_audio_devices.bat
+setup_school_windows.bat
 ```
 
-### Real-audio home test
+That creates `.venv`, installs dependencies, and creates `config/local.yaml` from `config/local.example.yaml` if a local file does not already exist.
 
-`run_real_audio_test.bat` currently defaults to device 1 and 4 channels. Edit `DEVICE` and `CHANNELS` inside that file if Windows assigns different numbers.
+Edit `config/local.yaml` for the real installation. For a Dante Virtual Soundcard installation, the intended starting point is:
+
+```yaml
+runtime:
+  mode: real
+  device_name: "Dante Virtual Soundcard"
+```
+
+Then run:
+
+```powershell
+doctor_school.bat
+```
+
+Only after the doctor passes should you start:
+
+```powershell
+run_school_dry_run.bat
+```
+
+The school launcher still uses the **simulated camera driver**. It can receive real multichannel audio and generate camera requests in software, but it cannot transmit real camera commands yet.
 
 ## Operator hotkeys
 
-While SPEAKERPTZ is running on Windows:
-
-- `A` — toggle auto director on/off
-- `W` — request the configured wide shot
-- `1` through `9` — request that person's mapped preset and turn auto off
+- `A` — auto director on/off
+- `W` — wide-shot request
+- `1` through `9` — manual seat preset request and auto off
 - `Q` — quit
 
-All camera requests are still simulated in v0.3.
+## Logs
 
-## School / Dante direction
+Each run writes event-only logs to `logs/speakerptz-YYYYMMDD.log`. Logs include startup/shutdown, active-speaker handoffs, manual overrides, and simulated camera requests. Raw microphone audio is **not recorded** by SPEAKERPTZ.
 
-Later, Dante Virtual Soundcard can appear to Windows as the multichannel input. SPEAKERPTZ will use the same real-audio path, only with isolated board-mic channels instead of a laptop microphone array.
+## Dante note
 
-Do **not** alter a live Dante routing matrix or production camera network until the existing routes and clocking have been documented.
-
-## Room configuration
-
-Edit `config/room.yaml` to map:
-
-- input channel
-- person's display name
-- camera number
-- preset number
-- wide-shot preset
-
-The audio thresholds are also there so they can be tuned for the actual room after a live read-only test.
+SPEAKERPTZ sees Dante Virtual Soundcard as a normal multichannel Windows audio device. Dante routing itself should be documented and configured separately with the school's existing Dante tools. Do not alter a live Dante routing matrix or clocking configuration blindly.
