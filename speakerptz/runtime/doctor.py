@@ -38,6 +38,14 @@ def run_doctor(config_path: str) -> int:
     hostapi_name = runtime.get("hostapi_name")
 
     print(f"[PASS] Channel map: {logical_channels} logical mic(s) -> physical inputs {channel_map}")
+    vad_state = "enabled" if audio.get("vad_enabled", True) else "disabled (level-only compatibility mode)"
+    disabled = audio.get("disabled_channels", [])
+    bleed_pairs = audio.get("bleed_pairs", [])
+    print(
+        f"[PASS] Speech detector: local VAD {vad_state} | "
+        f"disabled channels={disabled or 'none'} | bleed pairs={bleed_pairs or 'none'}"
+    )
+    print("[PASS] Audio privacy: in-memory features only; raw audio recording is off")
 
     simulation_mode = runtime.get("mode", "real") == "simulate"
     print("\nWindows audio inputs visible to Python:")

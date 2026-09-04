@@ -35,6 +35,82 @@ def _require_number(mapping, key, default, minimum=0.0):
     return value
 
 
+def _number_between(mapping, key, default, minimum, maximum):
+    value = _require_number(mapping, key, default, minimum)
+    if value > maximum:
+        raise ConfigError(f"{key} must be between {minimum} and {maximum}")
+    return value
+
+
+def _validate_audio_detection(audio: dict, channels: int) -> None:
+    for key in ("vad_enabled", "adaptive_noise_enabled"):
+        if key in audio and not isinstance(audio[key], bool):
+            raise ConfigError(f"audio.{key} must be true or false.")
+
+    for key, default in (
+        ("confidence_min", 0.55),
+        ("vad_threshold", 0.55),
+        ("vad_weight", 0.45),
+        ("confidence_smoothing", 0.35),
+        ("adaptive_noise_alpha", 0.02),
+    ):
+        _number_between(audio, key, default, 0.0, 1.0)
+
+    transient = _require_int(audio, "transient_rejection_ms", 0) if "transient_rejection_ms" in audio else 180
+    if transient > 5000:
+        raise ConfigError("audio.transient_rejection_ms must not exceed 5000.")
+    _require_number(audio, "overlap_margin_db", 2.0)
+    _require_number(audio, "bleed_rejection_db", 6.0)
+
+    try:
+        floor_min = float(audio.get("noise_floor_min_db", -85.0))
+        floor_max = float(audio.get("noise_floor_max_db", -35.0))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("audio noise-floor bounds must be numbers.") from exc
+    if not -120.0 <= floor_min < floor_max <= 0.0:
+        raise ConfigError("audio noise-floor bounds must satisfy -120 <= min < max <= 0 dB.")
+
+    offsets = audio.get("level_offsets_db", [])
+    if not isinstance(offsets, list):
+        raise ConfigError("audio.level_offsets_db must be a list.")
+    if offsets and len(offsets) != channels:
+        raise ConfigError(f"audio.level_offsets_db must contain exactly {channels} values.")
+    try:
+        [float(value) for value in offsets]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("audio.level_offsets_db values must be numbers.") from exc
+
+    disabled = audio.get("disabled_channels", [])
+    if not isinstance(disabled, list):
+        raise ConfigError("audio.disabled_channels must be a list.")
+    try:
+        disabled_values = [int(value) for value in disabled]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("audio.disabled_channels values must be integers.") from exc
+    if len(set(disabled_values)) != len(disabled_values):
+        raise ConfigError("audio.disabled_channels contains duplicates.")
+    if any(value < 1 or value > channels for value in disabled_values):
+        raise ConfigError(f"audio.disabled_channels values must be between 1 and {channels}.")
+
+    pairs = audio.get("bleed_pairs", [])
+    if not isinstance(pairs, list):
+        raise ConfigError("audio.bleed_pairs must be a list of two-channel pairs.")
+    normalized_pairs = set()
+    for pair in pairs:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ConfigError("Every audio.bleed_pairs entry must contain exactly two channels.")
+        try:
+            first, second = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("audio.bleed_pairs channel values must be integers.") from exc
+        if first == second or not (1 <= first <= channels and 1 <= second <= channels):
+            raise ConfigError(f"audio.bleed_pairs channels must be distinct and between 1 and {channels}.")
+        normalized = tuple(sorted((first, second)))
+        if normalized in normalized_pairs:
+            raise ConfigError(f"Duplicate audio.bleed_pairs relationship: {normalized}")
+        normalized_pairs.add(normalized)
+
+
 def _validate_cameras(data: dict) -> dict[int, dict]:
     if "real_control_enabled" in data and not isinstance(data["real_control_enabled"], bool):
         raise ConfigError("real_control_enabled must be true or false.")
@@ -115,6 +191,7 @@ def validate_config(data: dict) -> None:
         normalize_channel_map(data["audio"].get("channel_map"), channels)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    _validate_audio_detection(data["audio"], channels)
 
     seen = set()
     for p in data["people"]:

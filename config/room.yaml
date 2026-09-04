@@ -42,6 +42,24 @@ audio:
   hold_time_ms: 1200
   silence_timeout_ms: 5000
   confidence_min: 0.55
+  # Local feature-based voice activity detection. No transcription, cloud, or
+  # raw-audio recording is used.
+  vad_enabled: true
+  vad_threshold: 0.55
+  vad_weight: 0.45
+  confidence_smoothing: 0.35
+  transient_rejection_ms: 180
+  overlap_margin_db: 2.0
+  adaptive_noise_enabled: true
+  adaptive_noise_alpha: 0.02
+  noise_floor_min_db: -85.0
+  noise_floor_max_db: -35.0
+  disabled_channels: []
+  level_offsets_db: [0.0, 0.0, 0.0, 0.0]
+  # Add known acoustic neighbors, for example [[1, 2], [2, 3]]. Leave empty
+  # until the actual room layout is confirmed.
+  bleed_pairs: []
+  bleed_rejection_db: 6.0
 
 people:
   - {mic_channel: 1, name: Seat 1, camera: 1, preset: 1}

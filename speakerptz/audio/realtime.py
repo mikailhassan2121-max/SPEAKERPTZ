@@ -7,6 +7,7 @@ import numpy as np
 import sounddevice as sd
 
 from .channelmap import normalize_channel_map, required_physical_channels
+from .vad import AudioObservation, VoiceActivityAnalyzer
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,9 @@ class RealAudioSource:
         self.channel_map = normalize_channel_map(channel_map, self.channels)
         self.physical_channels = required_physical_channels(self.channel_map)
         self._indices = [v - 1 for v in self.channel_map]
-        self._q: queue.Queue[list[float]] = queue.Queue(maxsize=8)
-        self._last = [-100.0] * self.channels
+        self._q: queue.Queue[AudioObservation] = queue.Queue(maxsize=8)
+        self._last = AudioObservation([-100.0] * self.channels, [0.0] * self.channels)
+        self._vad = VoiceActivityAnalyzer(self.sample_rate, self.channels)
         self._last_callback = 0.0
         self._last_status = ""
         self._stream = sd.InputStream(
@@ -55,16 +57,17 @@ class RealAudioSource:
     def _callback(self, indata, frames, time_info, status):
         self._last_callback = time.monotonic()
         self._last_status = str(status) if status else ""
-        levels = [self._rms_db(indata[:, idx]) for idx in self._indices]
+        logical_samples = np.asarray(indata[:, self._indices], dtype=np.float64)
+        observation = self._vad.analyze(logical_samples)
         try:
-            self._q.put_nowait(levels)
+            self._q.put_nowait(observation)
         except queue.Full:
             try:
                 self._q.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self._q.put_nowait(levels)
+                self._q.put_nowait(observation)
             except queue.Full:
                 pass
 
@@ -76,13 +79,16 @@ class RealAudioSource:
         self._stream.stop()
         self._stream.close()
 
-    def read_levels(self):
+    def read_observation(self) -> AudioObservation:
         try:
             while True:
                 self._last = self._q.get_nowait()
         except queue.Empty:
             pass
         return self._last
+
+    def read_levels(self):
+        return self.read_observation().levels_db
 
     def health(self, stale_after: float = 1.5) -> AudioHealth:
         age = max(0.0, time.monotonic() - self._last_callback)
