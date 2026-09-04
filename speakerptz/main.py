@@ -21,7 +21,7 @@ from .runtime.state import RuntimeState
 from .ui.dashboard import DashboardCommand, DashboardServer, DashboardState
 
 
-VERSION = "0.10"
+VERSION = "1.0-rc1"
 
 
 class ConsoleControls:

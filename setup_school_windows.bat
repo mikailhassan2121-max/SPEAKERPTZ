@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 echo ==============================================
-echo SPEAKERPTZ v0.10 - School computer setup
+echo SPEAKERPTZ v1.0-rc1 - School computer setup
 echo ==============================================
 py -3.12 --version >nul 2>&1
 if errorlevel 1 (

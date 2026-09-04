@@ -1,6 +1,60 @@
 # SPEAKERPTZ
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
+It listens to an already-routed multichannel audio device (typically Dante Virtual
+Soundcard), locally decides which configured seat is currently speaking, and recalls
+that seat's PTZ camera preset — with a fail-safe camera framework, an operator
+dashboard, and manual override always available.
+
+## Current status: SPEAKERPTZ v1.0-rc1 (release candidate)
+
+This is a **release candidate**, not stable v1.0.0. The software is complete and
+passes its full automated test suite, startup doctor, and soak test on this
+development machine. Stable v1.0.0 will only be declared after physical validation at
+the school — see **REQUIRED SCHOOL VALIDATION** below and in
+[FIELD_SETUP.md](FIELD_SETUP.md).
+
+Read the docs in this order:
+
+1. **README.md** (this file) — what SPEAKERPTZ is and the normal meeting routine.
+2. **[FIELD_SETUP.md](FIELD_SETUP.md)** — first-time physical installation and
+   calibration at the school, from a fresh clone/ZIP through a hardware rehearsal.
+3. **[RUNTIME_RESILIENCE.md](RUNTIME_RESILIENCE.md)** — technical reliability
+   details (crash recovery, exit codes, logging).
+4. **[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)** — exact requirements for this
+   release candidate and for promoting it to stable v1.0.0.
+
+### Normal meeting routine
+
+Once [FIELD_SETUP.md](FIELD_SETUP.md) has been completed for this room:
+
+1. Start the production PC.
+2. Start/verify Dante Virtual Soundcard is running and subscribed.
+3. Run `start_speakerptz.bat`.
+4. The startup doctor runs automatically; fix anything it marks `FAIL`.
+5. Check the Dante/audio health line in the console or dashboard.
+6. Check camera health for every configured camera.
+7. Verify `W` (wide) and a manual seat key (`1`-`9`) both move the expected camera.
+8. Press `A` (or use the dashboard) to arm AUTO. AUTO always starts OFF, every launch.
+9. Run the meeting.
+10. If anything looks wrong: press `X` (emergency stop) or `A` to turn AUTO off, and
+    use the physical joystick, which keeps working independently the entire time.
+
+### REQUIRED SCHOOL VALIDATION
+
+These are physical-world confirmations, not software defects. They are expected to
+be outstanding before this release candidate can become stable v1.0.0:
+
+- The school's exact Dante routing/subscriptions have not yet been confirmed.
+- The actual Dante Virtual Soundcard device has not yet been tested at the school.
+- The exact PTZ camera model/protocol may not yet be known.
+- Coexistence with the existing physical joystick/controller has not yet been
+  verified in the school's room.
+- The real seat/microphone mapping has not yet been physically confirmed.
+- Real room acoustic calibration has not yet been completed.
+
+`field_readiness.bat` tracks exactly how far a given install has gotten through
+this list; see [FIELD_SETUP.md](FIELD_SETUP.md).
 
 ## v0.10 — school field-validation toolkit
 

@@ -202,7 +202,7 @@ class DashboardServer:
         state = self.state
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "SPEAKERPTZ/0.8"
+            server_version = "SPEAKERPTZ/1.0-rc1"
 
             def log_message(self, format, *args):
                 return
@@ -241,21 +241,29 @@ class DashboardServer:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
             def do_POST(self):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                # Always drain the request body up front, before any early
+                # rejection. If a response is sent and the connection closed
+                # while the client's body is still unread in the socket
+                # buffer, Windows sends a hard RST instead of a graceful
+                # close, which surfaces to the client as a flaky
+                # ConnectionAbortedError (WinError 10053) unrelated to the
+                # actual request outcome.
+                body = self.rfile.read(min(length, 4096)) if length > 0 else b""
                 if urlparse(self.path).path != "/api/command":
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
                     return
                 if not secrets.compare_digest(self.headers.get("X-SpeakerPTZ-Token", ""), state.control_token):
                     self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid dashboard control token"})
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    length = 0
                 if length <= 0 or length > 4096:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid request size"})
                     return
                 try:
-                    payload = json.loads(self.rfile.read(length))
+                    payload = json.loads(body)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON"})
                     return

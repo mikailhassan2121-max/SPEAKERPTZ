@@ -90,3 +90,35 @@ def test_local_http_api_is_readable_but_commands_require_token():
         assert state.drain_commands()[0].action == "wide"
     finally:
         server.stop()
+
+
+def test_rejected_command_bodies_never_abort_the_connection():
+    # Regression test for a Windows-only flaky failure: an early rejection
+    # (bad token here) must still fully read the request body before
+    # responding. Otherwise unread bytes left in the socket receive buffer
+    # cause the OS to send a hard RST on close instead of a graceful
+    # shutdown, which surfaces to the client as ConnectionAbortedError /
+    # WinError 10053 instead of the intended HTTP error response. Repeated
+    # here (fresh connection each time) because the original bug depended on
+    # TCP buffering/timing and did not reproduce on every single request.
+    state = DashboardState()
+    state.update(version="0.10", mode_banner="SIMULATION / DRY RUN")
+    server = DashboardServer(state, "127.0.0.1", 0)
+    url = server.start()
+    try:
+        body = json.dumps({"action": "wide"}).encode()
+        for _ in range(50):
+            request = Request(
+                f"{url}/api/command",
+                data=body,
+                headers={"Content-Type": "application/json", "X-SpeakerPTZ-Token": "wrong-token"},
+                method="POST",
+            )
+            try:
+                urlopen(request, timeout=2)
+            except HTTPError as exc:
+                assert exc.code == 403
+            else:
+                raise AssertionError("command with an invalid token should be rejected")
+    finally:
+        server.stop()

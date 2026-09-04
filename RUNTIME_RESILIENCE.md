@@ -39,7 +39,7 @@ Run the hardware-free suite before deployment:
 .\doctor_school.bat
 ```
 
-The soak test runs 5,000 deterministic synthetic frames covering handoffs, silence, overlap, audio dropout, camera failure, and emergency-stop invariants.
+The soak test runs 25,000 deterministic synthetic frames (about 2-3 seconds) covering handoffs, silence, overlap, audio dropout, camera failure, and emergency-stop invariants. Pass `--soak-iterations` to `speakerptz.main --soak-test` to run a different count, for example the original 5,000-frame run.
 
 ## Optional Windows sign-in start
 

@@ -1,4 +1,4 @@
-# SPEAKERPTZ v0.10 — School Field Setup Guide
+# SPEAKERPTZ v1.0-rc1 — School Field Setup Guide
 
 This is the step-by-step guide for installing and calibrating SPEAKERPTZ at an
 actual school board room, from a fresh clone through a controlled hardware
@@ -18,11 +18,13 @@ re-run independently later (for example, after a microphone is moved).
 | SCHOOL HARDWARE TESTED | Run against the actual school Dante network and PTZ cameras. |
 | FIELD VALIDATED | The full sequence in this guide has been physically completed at the school. |
 
-As of v0.10, SPEAKERPTZ is **IMPLEMENTED, SOFTWARE TESTED, and SIMULATOR
-TESTED**. It has **not** been FIELD VALIDATED — the school's exact Dante
-routing and PTZ camera model have not yet been physically confirmed. Nothing
-in this guide should be read as claiming otherwise; `field_readiness.bat`
-will tell you exactly which of those levels the current install has reached.
+The school field-setup toolkit referenced throughout this guide was added in
+v0.10 and is unchanged in v1.0-rc1. As of v1.0-rc1, SPEAKERPTZ is
+**IMPLEMENTED, SOFTWARE TESTED, and SIMULATOR TESTED**. It has **not** been
+FIELD VALIDATED — the school's exact Dante routing and PTZ camera model have
+not yet been physically confirmed. Nothing in this guide should be read as
+claiming otherwise; `field_readiness.bat` will tell you exactly which of
+those levels the current install has reached.
 
 ---
 
