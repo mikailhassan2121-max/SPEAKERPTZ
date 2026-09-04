@@ -2,12 +2,16 @@ runtime:
   mode: simulate
   device_name: null
   device_index: null
+  hostapi_name: null
   auto_start: true
   log_dir: logs
+  audio_stale_seconds: 1.5
 
 audio:
   sample_rate: 48000
   channels: 8
+  channel_map: [1, 2, 3, 4, 5, 6, 7, 8]
+  identifier_channels: 8
   calibration_seconds: 3.0
   absolute_threshold_db: -50.0
   signal_margin_db: 8.0

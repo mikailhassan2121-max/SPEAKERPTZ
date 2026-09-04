@@ -1,19 +1,31 @@
 # Copy this file to config/local.yaml on the SCHOOL COMPUTER.
-# config/local.yaml is intentionally ignored by Git so each installation can
-# keep its own device selection, seat names, and camera preset map.
+# config/local.yaml is intentionally ignored by Git.
 
 runtime:
   mode: real
-  # Prefer a stable name substring over a Windows device index, because device
-  # numbers can change after reboots or hardware changes.
+  # Prefer a stable name substring over a Windows device index.
   device_name: "Dante Virtual Soundcard"
   device_index: null
+  # Optional: if Windows exposes the same endpoint through several host APIs,
+  # add a substring such as "WASAPI" after checking list_audio_devices.bat.
+  hostapi_name: null
   auto_start: true
   log_dir: logs
+  audio_stale_seconds: 1.5
 
 audio:
   sample_rate: 48000
+
+  # Number of logical microphones SPEAKERPTZ will analyze.
   channels: 8
+
+  # Map each logical MIC to a 1-based physical DVS input.
+  # Example [5,6,9,10] means MIC 1<-DVS 5, MIC 2<-DVS 6, etc.
+  channel_map: [1, 2, 3, 4, 5, 6, 7, 8]
+
+  # Number of raw physical inputs shown by identify_dante_channels.bat.
+  identifier_channels: 8
+
   calibration_seconds: 3.0
   absolute_threshold_db: -50.0
   signal_margin_db: 8.0
@@ -25,38 +37,14 @@ audio:
   confidence_min: 0.55
 
 people:
-  - mic_channel: 1
-    name: Board Member 1
-    camera: 1
-    preset: 1
-  - mic_channel: 2
-    name: Board Member 2
-    camera: 1
-    preset: 2
-  - mic_channel: 3
-    name: Board Member 3
-    camera: 1
-    preset: 3
-  - mic_channel: 4
-    name: Board Member 4
-    camera: 1
-    preset: 4
-  - mic_channel: 5
-    name: Board Member 5
-    camera: 1
-    preset: 5
-  - mic_channel: 6
-    name: Superintendent
-    camera: 1
-    preset: 6
-  - mic_channel: 7
-    name: Podium
-    camera: 2
-    preset: 1
-  - mic_channel: 8
-    name: Spare
-    camera: 1
-    preset: 8
+  - {mic_channel: 1, name: Board Member 1, camera: 1, preset: 1}
+  - {mic_channel: 2, name: Board Member 2, camera: 1, preset: 2}
+  - {mic_channel: 3, name: Board Member 3, camera: 1, preset: 3}
+  - {mic_channel: 4, name: Board Member 4, camera: 1, preset: 4}
+  - {mic_channel: 5, name: Board Member 5, camera: 1, preset: 5}
+  - {mic_channel: 6, name: Superintendent, camera: 1, preset: 6}
+  - {mic_channel: 7, name: Podium, camera: 2, preset: 1}
+  - {mic_channel: 8, name: Spare, camera: 1, preset: 8}
 
 wide_shot:
   camera: 1

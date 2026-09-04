@@ -2,71 +2,103 @@
 
 Portable active-speaker PTZ controller for boardrooms, auditoriums, and meeting spaces.
 
-## v0.4 development branch
+## v0.5 — Dante Virtual Soundcard preparation
 
-v0.4 focuses on making the proven v0.3 detector easy and safe to deploy on a dedicated school production PC.
+v0.5 keeps camera control **simulation-only** and strengthens the audio/deployment side for the dedicated school production PC.
 
-### Added in v0.4
+### Added in v0.5
 
-- per-computer `config/local.yaml` that is intentionally **not committed to Git**
-- audio-device selection by stable **device-name substring** as well as numeric index
-- `doctor_school.bat` startup self-test before a meeting
-- rotating local event logs under `logs/`
-- safer one-click school setup and dry-run launchers
-- validation for duplicate/out-of-range mic mappings
-- camera driver remains **simulator-only**; this branch cannot control a real PTZ yet
+- physical Dante/DVS input -> logical SPEAKERPTZ mic mapping with `audio.channel_map`
+- support for sparse maps such as `MIC 1 <- DVS 5`, `MIC 2 <- DVS 6`, `MIC 3 <- DVS 9`
+- `identify_dante_channels.bat` live physical-input meter for finding which DVS channel belongs to each board microphone
+- optional Windows host-API preference when several endpoints share the same device name
+- improved startup doctor showing logical/physical channel requirements and host APIs
+- live audio callback watchdog; auto-director disables itself if the audio stream goes stale
+- audio recovery/stale events written to the normal local event log
+- no raw audio recording
+- real PTZ transmission is still disabled in this release
 
-## Development quick start
+## Important Dante model
+
+SPEAKERPTZ does **not** implement the Dante network protocol itself. Dante Virtual Soundcard (DVS) presents subscribed Dante channels to Windows as a multichannel audio interface; SPEAKERPTZ opens that Windows audio interface. Dante subscriptions and clocking remain managed separately in the existing Dante environment.
+
+## School computer workflow
+
+After cloning the repository:
+
+```powershell
+setup_school_windows.bat
+doctor_school.bat
+```
+
+Edit `config/local.yaml` for the actual machine. A typical starting point is:
+
+```yaml
+runtime:
+  mode: real
+  device_name: "Dante Virtual Soundcard"
+  device_index: null
+  hostapi_name: null
+
+audio:
+  sample_rate: 48000
+  channels: 8
+  channel_map: [1, 2, 3, 4, 5, 6, 7, 8]
+  identifier_channels: 8
+```
+
+If the board microphones are not on consecutive DVS inputs, use a sparse map. For example:
+
+```yaml
+audio:
+  channels: 4
+  channel_map: [5, 6, 9, 10]
+```
+
+That means:
+
+```text
+SPEAKERPTZ MIC 1 <- physical DVS input 5
+SPEAKERPTZ MIC 2 <- physical DVS input 6
+SPEAKERPTZ MIC 3 <- physical DVS input 9
+SPEAKERPTZ MIC 4 <- physical DVS input 10
+```
+
+## Discover the board mic channels
+
+After `doctor_school.bat` passes, run:
+
+```powershell
+identify_dante_channels.bat
+```
+
+Speak into **one board microphone at a time** and note which `PHYS ##` meter peaks. Then put those physical input numbers into `audio.channel_map` in `config/local.yaml`.
+
+This identifier does not modify Dante routing and does not send any PTZ commands.
+
+## Safe dry run
+
+```powershell
+run_school_dry_run.bat
+```
+
+The dry run can receive real multichannel audio and generate simulated camera preset requests. It cannot transmit real camera commands.
+
+## Operator hotkeys
+
+- `A` — auto director on/off
+- `W` — wide-shot request
+- `1` through `9` — manual logical mic/seat preset request and auto off
+- `Q` — quit
+
+## Logs and privacy
+
+Each run writes event-only logs to `logs/speakerptz-YYYYMMDD.log`. Logs include startup/shutdown, active-speaker handoffs, manual overrides, and audio-health events. **SPEAKERPTZ does not record or save raw microphone audio.**
+
+## Development
 
 ```powershell
 setup_windows.bat
 run_simulation.bat
 run_tests.bat
 ```
-
-## School computer install
-
-After cloning the repository on the dedicated production computer:
-
-```powershell
-setup_school_windows.bat
-```
-
-That creates `.venv`, installs dependencies, and creates `config/local.yaml` from `config/local.example.yaml` if a local file does not already exist.
-
-Edit `config/local.yaml` for the real installation. For a Dante Virtual Soundcard installation, the intended starting point is:
-
-```yaml
-runtime:
-  mode: real
-  device_name: "Dante Virtual Soundcard"
-```
-
-Then run:
-
-```powershell
-doctor_school.bat
-```
-
-Only after the doctor passes should you start:
-
-```powershell
-run_school_dry_run.bat
-```
-
-The school launcher still uses the **simulated camera driver**. It can receive real multichannel audio and generate camera requests in software, but it cannot transmit real camera commands yet.
-
-## Operator hotkeys
-
-- `A` — auto director on/off
-- `W` — wide-shot request
-- `1` through `9` — manual seat preset request and auto off
-- `Q` — quit
-
-## Logs
-
-Each run writes event-only logs to `logs/speakerptz-YYYYMMDD.log`. Logs include startup/shutdown, active-speaker handoffs, manual overrides, and simulated camera requests. Raw microphone audio is **not recorded** by SPEAKERPTZ.
-
-## Dante note
-
-SPEAKERPTZ sees Dante Virtual Soundcard as a normal multichannel Windows audio device. Dante routing itself should be documented and configured separately with the school's existing Dante tools. Do not alter a live Dante routing matrix or clocking configuration blindly.
